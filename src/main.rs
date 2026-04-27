@@ -19,9 +19,14 @@ async fn main() -> Result<()> {
 async fn handle_connection(mut stream: TcpStream) -> Result<()> {
     let mut buf = [0u8; 512];
 
-    // The command is ignored for now; every request gets a hardcoded PONG.
-    stream.read(&mut buf).await?;
-    stream.write_all(b"+PONG\r\n").await?;
+    loop {
+        // The command is ignored for now; every request gets a hardcoded PONG.
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            println!("connection closed by client");
+            return Ok(());
+        }
 
-    Ok(())
+        stream.write_all(b"+PONG\r\n").await?;
+    }
 }
