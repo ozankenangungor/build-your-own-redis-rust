@@ -1,3 +1,6 @@
+// Each test binary uses its own subset of these helpers.
+#![allow(dead_code)]
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -21,19 +24,22 @@ impl Server {
     pub fn start() -> Self {
         let port = PORT.lock().unwrap_or_else(|e| e.into_inner());
 
-        let child = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"))
+        let process = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("failed to spawn server");
 
+        // Reaped by `Drop` on every path, including the panic below.
+        let server = Self {
+            process,
+            _port: port,
+        };
+
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             if TcpStream::connect(ADDR).is_ok() {
-                return Self {
-                    process: child,
-                    _port: port,
-                };
+                return server;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -67,15 +73,19 @@ impl Client {
         for arg in args {
             request.push_str(&format!("${}\r\n{arg}\r\n", arg.len()));
         }
-        self.0
-            .write_all(request.as_bytes())
-            .expect("failed to send command");
+        self.send_raw(request.as_bytes());
     }
 
-    /// Reads the next reply and asserts it matches `expected`.
+    pub fn send_raw(&mut self, bytes: &[u8]) {
+        self.0.write_all(bytes).expect("failed to send command");
+    }
+
+    /// Reads as many bytes as `expected` is long and asserts they match. Reading
+    /// a fixed length keeps the assertion independent of how the reply is split
+    /// across TCP reads.
     pub fn expect_reply(&mut self, expected: &str) {
-        let mut buf = [0u8; 512];
-        let n = self.0.read(&mut buf).expect("failed to read reply");
-        assert_eq!(String::from_utf8_lossy(&buf[..n]), expected);
+        let mut buf = vec![0u8; expected.len()];
+        self.0.read_exact(&mut buf).expect("failed to read reply");
+        assert_eq!(String::from_utf8_lossy(&buf), expected);
     }
 }

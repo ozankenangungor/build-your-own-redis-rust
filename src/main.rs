@@ -1,4 +1,8 @@
+mod resp;
+
 use anyhow::Result;
+use bytes::{Buf, BytesMut};
+use resp::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -21,16 +25,40 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_connection(mut stream: TcpStream) -> Result<()> {
-    let mut buf = [0u8; 512];
+    let mut buf = BytesMut::with_capacity(1024);
 
     loop {
-        // The command is ignored for now; every request gets a hardcoded PONG.
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
+        if stream.read_buf(&mut buf).await? == 0 {
             println!("connection closed by client");
             return Ok(());
         }
 
-        stream.write_all(b"+PONG\r\n").await?;
+        // A read may carry several commands at once, or only part of one.
+        while let Some((command, consumed)) = resp::parse(&buf)? {
+            buf.advance(consumed);
+
+            let reply = run(command);
+            stream.write_all(reply.encode().as_bytes()).await?;
+        }
+    }
+}
+
+fn run(command: Value) -> Value {
+    let Value::Array(parts) = command else {
+        return Value::Error("ERR expected a command as an array".into());
+    };
+
+    let mut parts = parts.into_iter();
+    let Some(Value::BulkString(name)) = parts.next() else {
+        return Value::Error("ERR expected a command name".into());
+    };
+
+    match name.to_uppercase().as_str() {
+        "PING" => Value::SimpleString("PONG".into()),
+        "ECHO" => match parts.next() {
+            Some(Value::BulkString(message)) => Value::BulkString(message),
+            _ => Value::Error("ERR wrong number of arguments for 'echo' command".into()),
+        },
+        _ => Value::Error(format!("ERR unknown command '{name}'")),
     }
 }

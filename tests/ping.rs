@@ -23,6 +23,15 @@ fn responds_to_multiple_pings_on_one_connection() {
 }
 
 #[test]
+fn answers_every_command_arriving_in_one_read() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send_raw(b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n");
+    client.expect_reply("+PONG\r\n+PONG\r\n");
+}
+
+#[test]
 fn serves_concurrent_clients() {
     let server = Server::start();
     let mut clients: Vec<_> = (0..3).map(|_| server.connect()).collect();
