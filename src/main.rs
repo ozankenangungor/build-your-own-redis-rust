@@ -10,9 +10,13 @@ async fn main() -> Result<()> {
         let (stream, addr) = listener.accept().await?;
         println!("accepted new connection from {addr}");
 
-        if let Err(e) = handle_connection(stream).await {
-            eprintln!("connection error: {e}");
-        }
+        // Each connection gets its own task, so a slow client cannot keep the
+        // server from accepting the next one.
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(stream).await {
+                eprintln!("connection error: {e}");
+            }
+        });
     }
 }
 

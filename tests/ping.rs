@@ -21,3 +21,18 @@ fn responds_to_multiple_pings_on_one_connection() {
         client.expect_reply("+PONG\r\n");
     }
 }
+
+#[test]
+fn serves_concurrent_clients() {
+    let server = Server::start();
+    let mut clients: Vec<_> = (0..3).map(|_| server.connect()).collect();
+
+    // Every client sends before any of them reads, so the server cannot serve
+    // them one connection at a time.
+    for client in &mut clients {
+        client.send(&["PING"]);
+    }
+    for client in &mut clients {
+        client.expect_reply("+PONG\r\n");
+    }
+}
