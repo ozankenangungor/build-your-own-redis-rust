@@ -4,6 +4,7 @@ mod store;
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use resp::Value;
+use std::time::Duration;
 use store::Store;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -62,10 +63,13 @@ fn run(command: Value, store: &Store) -> Value {
             _ => wrong_arity("echo"),
         },
         "SET" => match args {
-            [key, value] => {
-                store.set(key.clone(), value.clone());
-                Value::SimpleString("OK".into())
-            }
+            [key, value, options @ ..] => match parse_expiry(options) {
+                Ok(expires_in) => {
+                    store.set(key.clone(), value.clone(), expires_in);
+                    Value::SimpleString("OK".into())
+                }
+                Err(error) => error,
+            },
             _ => wrong_arity("set"),
         },
         "GET" => match args {
@@ -89,6 +93,27 @@ fn into_parts(command: Value) -> Option<Vec<String>> {
             _ => None,
         })
         .collect()
+}
+
+/// Reads the trailing options of `SET`. Only the expiry ones are supported so
+/// far, and the error replies match what real Redis sends.
+fn parse_expiry(options: &[String]) -> Result<Option<Duration>, Value> {
+    let [unit, amount] = options else {
+        return match options {
+            [] => Ok(None),
+            _ => Err(Value::Error("ERR syntax error".into())),
+        };
+    };
+
+    let amount = amount
+        .parse()
+        .map_err(|_| Value::Error("ERR value is not an integer or out of range".into()))?;
+
+    match unit.to_uppercase().as_str() {
+        "EX" => Ok(Some(Duration::from_secs(amount))),
+        "PX" => Ok(Some(Duration::from_millis(amount))),
+        _ => Err(Value::Error("ERR syntax error".into())),
+    }
 }
 
 fn wrong_arity(command: &str) -> Value {
