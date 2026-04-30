@@ -7,6 +7,8 @@ pub enum Value {
     Error(String),
     BulkString(String),
     Array(Vec<Value>),
+    /// The null bulk string, used for replies such as a `GET` on a missing key.
+    Null,
 }
 
 impl Value {
@@ -22,6 +24,7 @@ impl Value {
                 }
                 encoded
             }
+            Value::Null => "$-1\r\n".to_string(),
         }
     }
 }
