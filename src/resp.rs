@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 pub enum Value {
     SimpleString(String),
     Error(String),
+    Integer(i64),
     BulkString(String),
     Array(Vec<Value>),
     /// The null bulk string, used for replies such as a `GET` on a missing key.
@@ -16,6 +17,7 @@ impl Value {
         match self {
             Value::SimpleString(text) => format!("+{text}\r\n"),
             Value::Error(message) => format!("-{message}\r\n"),
+            Value::Integer(number) => format!(":{number}\r\n"),
             Value::BulkString(text) => format!("${}\r\n{text}\r\n", text.len()),
             Value::Array(values) => {
                 let mut encoded = format!("*{}\r\n", values.len());
@@ -62,6 +64,7 @@ impl<'a> Parser<'a> {
         match kind {
             b'+' => Ok(Some(Value::SimpleString(text(payload)?))),
             b'-' => Ok(Some(Value::Error(text(payload)?))),
+            b':' => Ok(Some(Value::Integer(text(payload)?.parse()?))),
             b'$' => self.bulk_string(payload),
             b'*' => self.array(payload),
             _ => bail!("unknown type byte '{}'", kind as char),

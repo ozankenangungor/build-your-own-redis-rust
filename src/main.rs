@@ -5,7 +5,7 @@ use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use resp::Value;
 use std::time::Duration;
-use store::Store;
+use store::{Store, WrongType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -73,8 +73,18 @@ fn run(command: Value, store: &Store) -> Value {
             _ => wrong_arity("set"),
         },
         "GET" => match args {
-            [key] => store.get(key).map_or(Value::Null, Value::BulkString),
+            [key] => match store.get(key) {
+                Ok(value) => value.map_or(Value::Null, Value::BulkString),
+                Err(WrongType) => wrong_type(),
+            },
             _ => wrong_arity("get"),
+        },
+        "RPUSH" => match args {
+            [key, elements @ ..] if !elements.is_empty() => match store.rpush(key, elements) {
+                Ok(length) => Value::Integer(length as i64),
+                Err(WrongType) => wrong_type(),
+            },
+            _ => wrong_arity("rpush"),
         },
         _ => Value::Error(format!("ERR unknown command '{name}'")),
     }
@@ -120,4 +130,8 @@ fn wrong_arity(command: &str) -> Value {
     Value::Error(format!(
         "ERR wrong number of arguments for '{command}' command"
     ))
+}
+
+fn wrong_type() -> Value {
+    Value::Error("WRONGTYPE Operation against a key holding the wrong kind of value".into())
 }
