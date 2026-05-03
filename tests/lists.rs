@@ -23,6 +23,27 @@ fn appends_to_an_existing_list() {
 }
 
 #[test]
+fn creates_a_list_with_several_elements_at_once() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["RPUSH", "another_list", "bar", "baz"]);
+    client.expect_reply(":2\r\n");
+
+    client.send(&["RPUSH", "another_list", "foo", "bar", "baz"]);
+    client.expect_reply(":5\r\n");
+}
+
+#[test]
+fn rejects_a_push_without_elements() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["RPUSH", "list_key"]);
+    client.expect_reply("-ERR wrong number of arguments for 'rpush' command\r\n");
+}
+
+#[test]
 fn keeps_a_list_per_key() {
     let server = Server::start();
     let mut client = server.connect();
