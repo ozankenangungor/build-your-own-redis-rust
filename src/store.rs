@@ -50,6 +50,34 @@ impl Store {
         Ok(list.len())
     }
 
+    /// Returns the elements of the list at `key` between `start` and `stop`,
+    /// both inclusive. A window that falls outside the list is not an error: it
+    /// is clamped, and yields fewer elements or none at all.
+    pub fn lrange(&self, key: &str, start: i64, stop: i64) -> Result<Vec<String>, WrongType> {
+        let mut entries = self.entries();
+        drop_if_expired(&mut entries, key);
+
+        let list = match entries.get(key) {
+            None => return Ok(Vec::new()),
+            Some(Entry {
+                data: Data::List(list),
+                ..
+            }) => list,
+            Some(_) => return Err(WrongType),
+        };
+
+        // Negative indexes count from the end of the list; that comes later.
+        let start = start.max(0) as usize;
+        let stop = stop.max(0) as usize;
+
+        if start > stop || start >= list.len() {
+            return Ok(Vec::new());
+        }
+
+        let stop = stop.min(list.len() - 1);
+        Ok(list[start..=stop].to_vec())
+    }
+
     fn entries(&self) -> MutexGuard<'_, HashMap<String, Entry>> {
         // A panic elsewhere poisons the lock but leaves the map intact, so
         // recover rather than taking down every other connection with it.

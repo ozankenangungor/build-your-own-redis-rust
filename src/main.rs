@@ -86,6 +86,10 @@ fn run(command: Value, store: &Store) -> Value {
             },
             _ => wrong_arity("rpush"),
         },
+        "LRANGE" => match args {
+            [key, start, stop] => lrange(store, key, start, stop),
+            _ => wrong_arity("lrange"),
+        },
         _ => Value::Error(format!("ERR unknown command '{name}'")),
     }
 }
@@ -105,6 +109,17 @@ fn into_parts(command: Value) -> Option<Vec<String>> {
         .collect()
 }
 
+fn lrange(store: &Store, key: &str, start: &str, stop: &str) -> Value {
+    let (Ok(start), Ok(stop)) = (start.parse(), stop.parse()) else {
+        return not_an_integer();
+    };
+
+    match store.lrange(key, start, stop) {
+        Ok(elements) => Value::Array(elements.into_iter().map(Value::BulkString).collect()),
+        Err(WrongType) => wrong_type(),
+    }
+}
+
 /// Reads the trailing options of `SET`. Only the expiry ones are supported so
 /// far, and the error replies match what real Redis sends.
 fn parse_expiry(options: &[String]) -> Result<Option<Duration>, Value> {
@@ -115,9 +130,7 @@ fn parse_expiry(options: &[String]) -> Result<Option<Duration>, Value> {
         };
     };
 
-    let amount = amount
-        .parse()
-        .map_err(|_| Value::Error("ERR value is not an integer or out of range".into()))?;
+    let amount = amount.parse().map_err(|_| not_an_integer())?;
 
     match unit.to_uppercase().as_str() {
         "EX" => Ok(Some(Duration::from_secs(amount))),
@@ -130,6 +143,10 @@ fn wrong_arity(command: &str) -> Value {
     Value::Error(format!(
         "ERR wrong number of arguments for '{command}' command"
     ))
+}
+
+fn not_an_integer() -> Value {
+    Value::Error("ERR value is not an integer or out of range".into())
 }
 
 fn wrong_type() -> Value {
