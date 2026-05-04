@@ -5,7 +5,7 @@ use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use resp::Value;
 use std::time::Duration;
-use store::{Store, WrongType};
+use store::{Side, Store, WrongType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -80,11 +80,12 @@ fn run(command: Value, store: &Store) -> Value {
             _ => wrong_arity("get"),
         },
         "RPUSH" => match args {
-            [key, elements @ ..] if !elements.is_empty() => match store.rpush(key, elements) {
-                Ok(length) => Value::Integer(length as i64),
-                Err(WrongType) => wrong_type(),
-            },
+            [key, elements @ ..] if !elements.is_empty() => push(store, key, elements, Side::Right),
             _ => wrong_arity("rpush"),
+        },
+        "LPUSH" => match args {
+            [key, elements @ ..] if !elements.is_empty() => push(store, key, elements, Side::Left),
+            _ => wrong_arity("lpush"),
         },
         "LRANGE" => match args {
             [key, start, stop] => lrange(store, key, start, stop),
@@ -107,6 +108,13 @@ fn into_parts(command: Value) -> Option<Vec<String>> {
             _ => None,
         })
         .collect()
+}
+
+fn push(store: &Store, key: &str, elements: &[String], side: Side) -> Value {
+    match store.push(key, elements, side) {
+        Ok(length) => Value::Integer(length as i64),
+        Err(WrongType) => wrong_type(),
+    }
 }
 
 fn lrange(store: &Store, key: &str, start: &str, stop: &str) -> Value {

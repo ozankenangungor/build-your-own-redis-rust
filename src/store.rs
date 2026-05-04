@@ -9,6 +9,12 @@ pub struct Store(Arc<Mutex<HashMap<String, Entry>>>);
 /// Returned when a command is used on a key holding another type of value.
 pub struct WrongType;
 
+/// The end of a list a command works from.
+pub enum Side {
+    Left,
+    Right,
+}
+
 impl Store {
     pub fn set(&self, key: String, value: String, expires_in: Option<Duration>) {
         let entry = Entry {
@@ -32,9 +38,9 @@ impl Store {
         }
     }
 
-    /// Appends to the list at `key`, creating it first if it does not exist,
-    /// and returns the list's new length.
-    pub fn rpush(&self, key: &str, elements: &[String]) -> Result<usize, WrongType> {
+    /// Adds to the list at `key`, creating it first if it does not exist, and
+    /// returns the list's new length.
+    pub fn push(&self, key: &str, elements: &[String], side: Side) -> Result<usize, WrongType> {
         let mut entries = self.entries();
         drop_if_expired(&mut entries, key);
 
@@ -46,7 +52,15 @@ impl Store {
             return Err(WrongType);
         };
 
-        list.extend_from_slice(elements);
+        match side {
+            Side::Right => list.extend_from_slice(elements),
+            // Each element lands in front of the one before it, so a single
+            // push reverses the order of its arguments.
+            Side::Left => {
+                list.splice(0..0, elements.iter().rev().cloned());
+            }
+        }
+
         Ok(list.len())
     }
 

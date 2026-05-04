@@ -150,6 +150,57 @@ fn rejects_a_range_over_a_string() {
 }
 
 #[test]
+fn prepends_elements_in_reverse_order() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["LPUSH", "list_key", "c"]);
+    client.expect_reply(":1\r\n");
+
+    client.send(&["LPUSH", "list_key", "b", "a"]);
+    client.expect_reply(":3\r\n");
+
+    client.send(&["LRANGE", "list_key", "0", "-1"]);
+    client.expect_reply("*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+}
+
+#[test]
+fn prepends_onto_a_list_built_from_the_right() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["RPUSH", "list_key", "b", "c"]);
+    client.expect_reply(":2\r\n");
+
+    client.send(&["LPUSH", "list_key", "a"]);
+    client.expect_reply(":3\r\n");
+
+    client.send(&["LRANGE", "list_key", "0", "-1"]);
+    client.expect_reply("*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+}
+
+#[test]
+fn rejects_a_prepend_onto_a_string() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "bar"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["LPUSH", "foo", "element"]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
+#[test]
+fn rejects_a_prepend_without_elements() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["LPUSH", "list_key"]);
+    client.expect_reply("-ERR wrong number of arguments for 'lpush' command\r\n");
+}
+
+#[test]
 fn rejects_a_push_onto_a_string() {
     let server = Server::start();
     let mut client = server.connect();
