@@ -66,9 +66,8 @@ impl Store {
             Some(_) => return Err(WrongType),
         };
 
-        // Negative indexes count from the end of the list; that comes later.
-        let start = start.max(0) as usize;
-        let stop = stop.max(0) as usize;
+        let start = resolve_index(start, list.len());
+        let stop = resolve_index(stop, list.len());
 
         if start > stop || start >= list.len() {
             return Ok(Vec::new());
@@ -84,6 +83,17 @@ impl Store {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Turns a list index into an offset from the start. Negative indexes count
+/// back from the end, and one reaching past the start clamps to the first
+/// element rather than wrapping around.
+fn resolve_index(index: i64, len: usize) -> usize {
+    if index >= 0 {
+        index as usize
+    } else {
+        len.saturating_sub(index.unsigned_abs() as usize)
     }
 }
 

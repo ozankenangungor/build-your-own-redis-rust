@@ -78,6 +78,30 @@ fn lists_a_range_of_elements() {
 }
 
 #[test]
+fn counts_negative_indexes_from_the_end() {
+    let server = Server::start();
+    let mut client = server_with_five_elements(&server);
+
+    client.send(&["LRANGE", "list_key", "-2", "-1"]);
+    client.expect_reply("*2\r\n$1\r\nd\r\n$1\r\ne\r\n");
+
+    client.send(&["LRANGE", "list_key", "0", "-3"]);
+    client.expect_reply("*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n");
+
+    client.send(&["LRANGE", "list_key", "2", "-1"]);
+    client.expect_reply("*3\r\n$1\r\nc\r\n$1\r\nd\r\n$1\r\ne\r\n");
+}
+
+#[test]
+fn clamps_a_negative_index_reaching_past_the_start() {
+    let server = Server::start();
+    let mut client = server_with_five_elements(&server);
+
+    client.send(&["LRANGE", "list_key", "-6", "-4"]);
+    client.expect_reply("*2\r\n$1\r\na\r\n$1\r\nb\r\n");
+}
+
+#[test]
 fn treats_a_stop_past_the_end_as_the_last_element() {
     let server = Server::start();
     let mut client = server_with_five_elements(&server);
