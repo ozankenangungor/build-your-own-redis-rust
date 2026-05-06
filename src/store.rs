@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 /// The key-value store, shared by every connection.
 #[derive(Clone, Default)]
-pub struct Store(Arc<Mutex<HashMap<String, Entry>>>);
+pub struct Store(Arc<Mutex<Entries>>);
+
+type Entries = HashMap<String, Entry>;
 
 /// Returned when a command is used on a key holding another type of value.
 pub struct WrongType;
@@ -69,15 +71,8 @@ impl Store {
     /// is clamped, and yields fewer elements or none at all.
     pub fn lrange(&self, key: &str, start: i64, stop: i64) -> Result<Vec<String>, WrongType> {
         let mut entries = self.entries();
-        drop_if_expired(&mut entries, key);
-
-        let list = match entries.get(key) {
-            None => return Ok(Vec::new()),
-            Some(Entry {
-                data: Data::List(list),
-                ..
-            }) => list,
-            Some(_) => return Err(WrongType),
+        let Some(list) = list_at(&mut entries, key)? else {
+            return Ok(Vec::new());
         };
 
         let start = resolve_index(start, list.len());
@@ -91,12 +86,33 @@ impl Store {
         Ok(list[start..=stop].to_vec())
     }
 
-    fn entries(&self) -> MutexGuard<'_, HashMap<String, Entry>> {
+    /// Returns the length of the list at `key`, or zero if it does not exist.
+    pub fn llen(&self, key: &str) -> Result<usize, WrongType> {
+        let mut entries = self.entries();
+        Ok(list_at(&mut entries, key)?.map_or(0, Vec::len))
+    }
+
+    fn entries(&self) -> MutexGuard<'_, Entries> {
         // A panic elsewhere poisons the lock but leaves the map intact, so
         // recover rather than taking down every other connection with it.
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Looks up the list stored at `key`. `Ok(None)` means the key is absent, which
+/// list commands treat as an empty list rather than an error.
+fn list_at<'a>(entries: &'a mut Entries, key: &str) -> Result<Option<&'a Vec<String>>, WrongType> {
+    drop_if_expired(entries, key);
+
+    match entries.get(key) {
+        None => Ok(None),
+        Some(Entry {
+            data: Data::List(list),
+            ..
+        }) => Ok(Some(list)),
+        Some(_) => Err(WrongType),
     }
 }
 
@@ -112,7 +128,7 @@ fn resolve_index(index: i64, len: usize) -> usize {
 }
 
 /// Redis expires keys lazily, so drop this one now that we are looking at it.
-fn drop_if_expired(entries: &mut HashMap<String, Entry>, key: &str) {
+fn drop_if_expired(entries: &mut Entries, key: &str) {
     if entries.get(key).is_some_and(Entry::has_expired) {
         entries.remove(key);
     }

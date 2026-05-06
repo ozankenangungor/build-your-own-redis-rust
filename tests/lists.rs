@@ -150,6 +150,36 @@ fn rejects_a_range_over_a_string() {
 }
 
 #[test]
+fn reports_the_length_of_a_list() {
+    let server = Server::start();
+    let mut client = server_with_five_elements(&server);
+
+    client.send(&["LLEN", "list_key"]);
+    client.expect_reply(":5\r\n");
+}
+
+#[test]
+fn reports_zero_for_a_missing_list() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["LLEN", "missing_list_key"]);
+    client.expect_reply(":0\r\n");
+}
+
+#[test]
+fn rejects_a_length_query_on_a_string() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "bar"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["LLEN", "foo"]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
+#[test]
 fn prepends_elements_in_reverse_order() {
     let server = Server::start();
     let mut client = server.connect();

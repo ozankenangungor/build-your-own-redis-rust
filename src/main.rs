@@ -87,6 +87,13 @@ fn run(command: Value, store: &Store) -> Value {
             [key, elements @ ..] if !elements.is_empty() => push(store, key, elements, Side::Left),
             _ => wrong_arity("lpush"),
         },
+        "LLEN" => match args {
+            [key] => match store.llen(key) {
+                Ok(length) => Value::Integer(length as i64),
+                Err(WrongType) => wrong_type(),
+            },
+            _ => wrong_arity("llen"),
+        },
         "LRANGE" => match args {
             [key, start, stop] => lrange(store, key, start, stop),
             _ => wrong_arity("lrange"),
