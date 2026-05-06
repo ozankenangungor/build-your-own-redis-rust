@@ -87,6 +87,13 @@ fn run(command: Value, store: &Store) -> Value {
             [key, elements @ ..] if !elements.is_empty() => push(store, key, elements, Side::Left),
             _ => wrong_arity("lpush"),
         },
+        "LPOP" => match args {
+            [key] => match store.lpop(key) {
+                Ok(element) => element.map_or(Value::Null, Value::BulkString),
+                Err(WrongType) => wrong_type(),
+            },
+            _ => wrong_arity("lpop"),
+        },
         "LLEN" => match args {
             [key] => match store.llen(key) {
                 Ok(length) => Value::Integer(length as i64),

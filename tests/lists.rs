@@ -150,6 +150,60 @@ fn rejects_a_range_over_a_string() {
 }
 
 #[test]
+fn pops_the_first_element() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["RPUSH", "list_key", "one", "two", "three", "four", "five"]);
+    client.expect_reply(":5\r\n");
+
+    client.send(&["LPOP", "list_key"]);
+    client.expect_reply("$3\r\none\r\n");
+
+    client.send(&["LRANGE", "list_key", "0", "-1"]);
+    client.expect_reply("*4\r\n$3\r\ntwo\r\n$5\r\nthree\r\n$4\r\nfour\r\n$4\r\nfive\r\n");
+}
+
+#[test]
+fn returns_null_when_popping_a_missing_list() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["LPOP", "missing_list_key"]);
+    client.expect_reply("$-1\r\n");
+}
+
+#[test]
+fn drops_the_key_once_the_list_runs_empty() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["RPUSH", "list_key", "only"]);
+    client.expect_reply(":1\r\n");
+
+    client.send(&["LPOP", "list_key"]);
+    client.expect_reply("$4\r\nonly\r\n");
+
+    client.send(&["LLEN", "list_key"]);
+    client.expect_reply(":0\r\n");
+
+    client.send(&["LPOP", "list_key"]);
+    client.expect_reply("$-1\r\n");
+}
+
+#[test]
+fn rejects_a_pop_on_a_string() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "bar"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["LPOP", "foo"]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
+#[test]
 fn reports_the_length_of_a_list() {
     let server = Server::start();
     let mut client = server_with_five_elements(&server);

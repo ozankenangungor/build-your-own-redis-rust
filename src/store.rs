@@ -86,6 +86,27 @@ impl Store {
         Ok(list[start..=stop].to_vec())
     }
 
+    /// Removes and returns the first element of the list at `key`. Redis drops
+    /// a key once its list runs empty, so we do the same.
+    pub fn lpop(&self, key: &str) -> Result<Option<String>, WrongType> {
+        let mut entries = self.entries();
+        drop_if_expired(&mut entries, key);
+
+        let Some(entry) = entries.get_mut(key) else {
+            return Ok(None);
+        };
+        let Data::List(list) = &mut entry.data else {
+            return Err(WrongType);
+        };
+
+        let element = list.remove(0);
+        if list.is_empty() {
+            entries.remove(key);
+        }
+
+        Ok(Some(element))
+    }
+
     /// Returns the length of the list at `key`, or zero if it does not exist.
     pub fn llen(&self, key: &str) -> Result<usize, WrongType> {
         let mut entries = self.entries();
