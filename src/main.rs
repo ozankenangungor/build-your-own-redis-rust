@@ -88,10 +88,8 @@ fn run(command: Value, store: &Store) -> Value {
             _ => wrong_arity("lpush"),
         },
         "LPOP" => match args {
-            [key] => match store.lpop(key) {
-                Ok(element) => element.map_or(Value::Null, Value::BulkString),
-                Err(WrongType) => wrong_type(),
-            },
+            [key] => lpop(store, key, None),
+            [key, count] => lpop(store, key, Some(count)),
             _ => wrong_arity("lpop"),
         },
         "LLEN" => match args {
@@ -127,6 +125,32 @@ fn into_parts(command: Value) -> Option<Vec<String>> {
 fn push(store: &Store, key: &str, elements: &[String], side: Side) -> Value {
     match store.push(key, elements, side) {
         Ok(length) => Value::Integer(length as i64),
+        Err(WrongType) => wrong_type(),
+    }
+}
+
+/// Without a count `LPOP` replies with a single element, with one it replies
+/// with an array — even when that array holds a single element, or none.
+fn lpop(store: &Store, key: &str, count: Option<&str>) -> Value {
+    let Some(count) = count else {
+        return match store.lpop(key, 1) {
+            Ok(removed) => removed
+                .into_iter()
+                .next()
+                .map_or(Value::Null, Value::BulkString),
+            Err(WrongType) => wrong_type(),
+        };
+    };
+
+    let Ok(count) = count.parse::<i64>() else {
+        return not_an_integer();
+    };
+    let Ok(count) = usize::try_from(count) else {
+        return Value::Error("ERR value is out of range, must be positive".into());
+    };
+
+    match store.lpop(key, count) {
+        Ok(removed) => Value::Array(removed.into_iter().map(Value::BulkString).collect()),
         Err(WrongType) => wrong_type(),
     }
 }
