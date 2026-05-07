@@ -1,10 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
 
 /// The key-value store, shared by every connection.
 #[derive(Clone, Default)]
-pub struct Store(Arc<Mutex<Entries>>);
+pub struct Store(Arc<Mutex<State>>);
+
+#[derive(Default)]
+struct State {
+    entries: Entries,
+    /// Clients blocked on a key, in the order they started waiting.
+    waiters: HashMap<String, VecDeque<oneshot::Sender<String>>>,
+}
 
 type Entries = HashMap<String, Entry>;
 
@@ -17,20 +25,27 @@ pub enum Side {
     Right,
 }
 
+/// The outcome of a blocking pop: either an element was there, or the caller
+/// has been queued and will be handed one as soon as it arrives.
+pub enum Blocked {
+    Ready(String),
+    Waiting(oneshot::Receiver<String>),
+}
+
 impl Store {
     pub fn set(&self, key: String, value: String, expires_in: Option<Duration>) {
         let entry = Entry {
             data: Data::String(value),
             expires_at: expires_in.map(|delay| Instant::now() + delay),
         };
-        self.entries().insert(key, entry);
+        self.state().entries.insert(key, entry);
     }
 
     pub fn get(&self, key: &str) -> Result<Option<String>, WrongType> {
-        let mut entries = self.entries();
-        drop_if_expired(&mut entries, key);
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
 
-        match entries.get(key) {
+        match state.entries.get(key) {
             None => Ok(None),
             Some(Entry {
                 data: Data::String(value),
@@ -43,10 +58,14 @@ impl Store {
     /// Adds to the list at `key`, creating it first if it does not exist, and
     /// returns the list's new length.
     pub fn push(&self, key: &str, elements: &[String], side: Side) -> Result<usize, WrongType> {
-        let mut entries = self.entries();
-        drop_if_expired(&mut entries, key);
+        let mut guard = self.state();
+        // Borrow the state once so `entries` and `waiters` count as separate
+        // fields rather than two borrows of the guard.
+        let state = &mut *guard;
+        drop_if_expired(&mut state.entries, key);
 
-        let entry = entries
+        let entry = state
+            .entries
             .entry(key.to_string())
             .or_insert_with(|| Entry::new(Data::List(Vec::new())));
 
@@ -63,15 +82,69 @@ impl Store {
             }
         }
 
-        Ok(list.len())
+        // Redis answers the pushing client with the length before handing
+        // anything to blocked clients, so measure it now.
+        let length = list.len();
+        state.wake_waiters(key);
+
+        Ok(length)
+    }
+
+    /// Removes and returns up to `count` elements from the front of the list at
+    /// `key`. Redis drops a key once its list runs empty, so we do the same.
+    pub fn lpop(&self, key: &str, count: usize) -> Result<Vec<String>, WrongType> {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        let Some(entry) = state.entries.get_mut(key) else {
+            return Ok(Vec::new());
+        };
+        let Data::List(list) = &mut entry.data else {
+            return Err(WrongType);
+        };
+
+        let removed = list.drain(..count.min(list.len())).collect();
+        if list.is_empty() {
+            state.entries.remove(key);
+        }
+
+        Ok(removed)
+    }
+
+    /// Takes the first element of the list at `key`, or puts the caller at the
+    /// back of the queue of clients waiting for one.
+    pub fn blpop(&self, key: &str) -> Result<Blocked, WrongType> {
+        let mut guard = self.state();
+        let state = &mut *guard;
+        drop_if_expired(&mut state.entries, key);
+
+        match state.entries.get(key) {
+            Some(Entry {
+                data: Data::List(_),
+                ..
+            }) => {}
+            Some(_) => return Err(WrongType),
+            None => {
+                let (sender, receiver) = oneshot::channel();
+                state
+                    .waiters
+                    .entry(key.to_string())
+                    .or_default()
+                    .push_back(sender);
+                return Ok(Blocked::Waiting(receiver));
+            }
+        }
+
+        let element = pop_first(&mut state.entries, key).expect("a stored list is never empty");
+        Ok(Blocked::Ready(element))
     }
 
     /// Returns the elements of the list at `key` between `start` and `stop`,
     /// both inclusive. A window that falls outside the list is not an error: it
     /// is clamped, and yields fewer elements or none at all.
     pub fn lrange(&self, key: &str, start: i64, stop: i64) -> Result<Vec<String>, WrongType> {
-        let mut entries = self.entries();
-        let Some(list) = list_at(&mut entries, key)? else {
+        let mut state = self.state();
+        let Some(list) = list_at(&mut state.entries, key)? else {
             return Ok(Vec::new());
         };
 
@@ -86,39 +159,45 @@ impl Store {
         Ok(list[start..=stop].to_vec())
     }
 
-    /// Removes and returns up to `count` elements from the front of the list at
-    /// `key`. Redis drops a key once its list runs empty, so we do the same.
-    pub fn lpop(&self, key: &str, count: usize) -> Result<Vec<String>, WrongType> {
-        let mut entries = self.entries();
-        drop_if_expired(&mut entries, key);
-
-        let Some(entry) = entries.get_mut(key) else {
-            return Ok(Vec::new());
-        };
-        let Data::List(list) = &mut entry.data else {
-            return Err(WrongType);
-        };
-
-        let removed = list.drain(..count.min(list.len())).collect();
-        if list.is_empty() {
-            entries.remove(key);
-        }
-
-        Ok(removed)
-    }
-
     /// Returns the length of the list at `key`, or zero if it does not exist.
     pub fn llen(&self, key: &str) -> Result<usize, WrongType> {
-        let mut entries = self.entries();
-        Ok(list_at(&mut entries, key)?.map_or(0, Vec::len))
+        let mut state = self.state();
+        Ok(list_at(&mut state.entries, key)?.map_or(0, Vec::len))
     }
 
-    fn entries(&self) -> MutexGuard<'_, Entries> {
-        // A panic elsewhere poisons the lock but leaves the map intact, so
+    fn state(&self) -> MutexGuard<'_, State> {
+        // A panic elsewhere poisons the lock but leaves the state intact, so
         // recover rather than taking down every other connection with it.
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl State {
+    /// Hands the elements at `key` to the clients blocked on it, serving the
+    /// one that has been waiting the longest first.
+    fn wake_waiters(&mut self, key: &str) {
+        let Some(queue) = self.waiters.get_mut(key) else {
+            return;
+        };
+
+        while let Some(waiter) = queue.pop_front() {
+            let Some(element) = pop_first(&mut self.entries, key) else {
+                queue.push_front(waiter);
+                break;
+            };
+
+            // A client that gave up in the meantime leaves its element behind
+            // for whoever is next in line.
+            if let Err(element) = waiter.send(element) {
+                push_first(&mut self.entries, key, element);
+            }
+        }
+
+        if queue.is_empty() {
+            self.waiters.remove(key);
+        }
     }
 }
 
@@ -134,6 +213,33 @@ fn list_at<'a>(entries: &'a mut Entries, key: &str) -> Result<Option<&'a Vec<Str
             ..
         }) => Ok(Some(list)),
         Some(_) => Err(WrongType),
+    }
+}
+
+fn pop_first(entries: &mut Entries, key: &str) -> Option<String> {
+    let Some(Entry {
+        data: Data::List(list),
+        ..
+    }) = entries.get_mut(key)
+    else {
+        return None;
+    };
+
+    let element = list.remove(0);
+    if list.is_empty() {
+        entries.remove(key);
+    }
+
+    Some(element)
+}
+
+fn push_first(entries: &mut Entries, key: &str, element: String) {
+    let entry = entries
+        .entry(key.to_string())
+        .or_insert_with(|| Entry::new(Data::List(Vec::new())));
+
+    if let Data::List(list) = &mut entry.data {
+        list.insert(0, element);
     }
 }
 

@@ -5,7 +5,7 @@ use anyhow::Result;
 use bytes::{Buf, BytesMut};
 use resp::Value;
 use std::time::Duration;
-use store::{Side, Store, WrongType};
+use store::{Blocked, Side, Store, WrongType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -42,13 +42,13 @@ async fn handle_connection(mut stream: TcpStream, store: Store) -> Result<()> {
         while let Some((command, consumed)) = resp::parse(&buf)? {
             buf.advance(consumed);
 
-            let reply = run(command, &store);
+            let reply = run(command, &store).await;
             stream.write_all(reply.encode().as_bytes()).await?;
         }
     }
 }
 
-fn run(command: Value, store: &Store) -> Value {
+async fn run(command: Value, store: &Store) -> Value {
     let Some(parts) = into_parts(command) else {
         return Value::Error("ERR expected an array of bulk strings".into());
     };
@@ -91,6 +91,10 @@ fn run(command: Value, store: &Store) -> Value {
             [key] => lpop(store, key, None),
             [key, count] => lpop(store, key, Some(count)),
             _ => wrong_arity("lpop"),
+        },
+        "BLPOP" => match args {
+            [key, timeout] => blpop(store, key, timeout).await,
+            _ => wrong_arity("blpop"),
         },
         "LLEN" => match args {
             [key] => match store.llen(key) {
@@ -153,6 +157,34 @@ fn lpop(store: &Store, key: &str, count: Option<&str>) -> Value {
         Ok(removed) => Value::Array(removed.into_iter().map(Value::BulkString).collect()),
         Err(WrongType) => wrong_type(),
     }
+}
+
+/// Pops the first element of `key`, waiting for one to arrive if the list is
+/// empty. The reply names the list, since a later stage lets a client block on
+/// several at once.
+async fn blpop(store: &Store, key: &str, timeout: &str) -> Value {
+    let Ok(timeout) = timeout.parse::<f64>() else {
+        return Value::Error("ERR timeout is not a float or out of range".into());
+    };
+    if timeout < 0.0 {
+        return Value::Error("ERR timeout is negative".into());
+    }
+
+    // Only the "wait forever" timeout of zero is honoured so far.
+    let element = match store.blpop(key) {
+        Ok(Blocked::Ready(element)) => element,
+        Ok(Blocked::Waiting(receiver)) => match receiver.await {
+            Ok(element) => element,
+            // The sender is only dropped when the server is shutting down.
+            Err(_) => return Value::Null,
+        },
+        Err(WrongType) => return wrong_type(),
+    };
+
+    Value::Array(vec![
+        Value::BulkString(key.to_string()),
+        Value::BulkString(element),
+    ])
 }
 
 fn lrange(store: &Store, key: &str, start: &str, stop: &str) -> Value {
