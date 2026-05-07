@@ -10,6 +10,8 @@ pub enum Value {
     Array(Vec<Value>),
     /// The null bulk string, used for replies such as a `GET` on a missing key.
     Null,
+    /// The null array, which is what a blocking command replies on a timeout.
+    NullArray,
 }
 
 impl Value {
@@ -27,6 +29,7 @@ impl Value {
                 encoded
             }
             Value::Null => "$-1\r\n".to_string(),
+            Value::NullArray => "*-1\r\n".to_string(),
         }
     }
 }

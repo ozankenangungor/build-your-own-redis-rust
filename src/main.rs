@@ -8,6 +8,8 @@ use std::time::Duration;
 use store::{Blocked, Side, Store, WrongType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
+use tokio::time;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -163,28 +165,55 @@ fn lpop(store: &Store, key: &str, count: Option<&str>) -> Value {
 /// empty. The reply names the list, since a later stage lets a client block on
 /// several at once.
 async fn blpop(store: &Store, key: &str, timeout: &str) -> Value {
-    let Ok(timeout) = timeout.parse::<f64>() else {
-        return Value::Error("ERR timeout is not a float or out of range".into());
+    let timeout = match parse_timeout(timeout) {
+        Ok(timeout) => timeout,
+        Err(error) => return error,
     };
-    if timeout < 0.0 {
-        return Value::Error("ERR timeout is negative".into());
-    }
 
-    // Only the "wait forever" timeout of zero is honoured so far.
     let element = match store.blpop(key) {
-        Ok(Blocked::Ready(element)) => element,
-        Ok(Blocked::Waiting(receiver)) => match receiver.await {
-            Ok(element) => element,
-            // The sender is only dropped when the server is shutting down.
-            Err(_) => return Value::Null,
-        },
+        Ok(Blocked::Ready(element)) => Some(element),
+        Ok(Blocked::Waiting(receiver)) => wait_for_element(receiver, timeout).await,
         Err(WrongType) => return wrong_type(),
     };
 
-    Value::Array(vec![
-        Value::BulkString(key.to_string()),
-        Value::BulkString(element),
-    ])
+    match element {
+        Some(element) => Value::Array(vec![
+            Value::BulkString(key.to_string()),
+            Value::BulkString(element),
+        ]),
+        None => Value::NullArray,
+    }
+}
+
+/// Reads a blocking command's timeout, given in seconds. `None` stands for the
+/// timeout of zero, which asks to wait indefinitely.
+fn parse_timeout(timeout: &str) -> Result<Option<Duration>, Value> {
+    let Ok(seconds) = timeout.parse::<f64>() else {
+        return Err(bad_timeout());
+    };
+    if seconds < 0.0 {
+        return Err(Value::Error("ERR timeout is negative".into()));
+    }
+    if seconds == 0.0 {
+        return Ok(None);
+    }
+
+    // Rejects the values a `Duration` cannot hold, such as NaN or infinity.
+    Duration::try_from_secs_f64(seconds)
+        .map(Some)
+        .map_err(|_| bad_timeout())
+}
+
+/// Dropping the receiver on a timeout also marks the queued waiter as gone, so
+/// the store hands the element to the next client instead of losing it.
+async fn wait_for_element(
+    receiver: oneshot::Receiver<String>,
+    timeout: Option<Duration>,
+) -> Option<String> {
+    match timeout {
+        None => receiver.await.ok(),
+        Some(timeout) => time::timeout(timeout, receiver).await.ok()?.ok(),
+    }
 }
 
 fn lrange(store: &Store, key: &str, start: &str, stop: &str) -> Value {
@@ -221,6 +250,10 @@ fn wrong_arity(command: &str) -> Value {
     Value::Error(format!(
         "ERR wrong number of arguments for '{command}' command"
     ))
+}
+
+fn bad_timeout() -> Value {
+    Value::Error("ERR timeout is not a float or out of range".into())
 }
 
 fn not_an_integer() -> Value {
