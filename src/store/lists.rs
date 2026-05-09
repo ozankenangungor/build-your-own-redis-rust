@@ -1,23 +1,5 @@
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use super::{Data, Entries, Entry, State, Store, WrongType, drop_if_expired};
 use tokio::sync::oneshot;
-
-/// The key-value store, shared by every connection.
-#[derive(Clone, Default)]
-pub struct Store(Arc<Mutex<State>>);
-
-#[derive(Default)]
-struct State {
-    entries: Entries,
-    /// Clients blocked on a key, in the order they started waiting.
-    waiters: HashMap<String, VecDeque<oneshot::Sender<String>>>,
-}
-
-type Entries = HashMap<String, Entry>;
-
-/// Returned when a command is used on a key holding another type of value.
-pub struct WrongType;
 
 /// The end of a list a command works from.
 pub enum Side {
@@ -33,28 +15,6 @@ pub enum Blocked {
 }
 
 impl Store {
-    pub fn set(&self, key: String, value: String, expires_in: Option<Duration>) {
-        let entry = Entry {
-            data: Data::String(value),
-            expires_at: expires_in.map(|delay| Instant::now() + delay),
-        };
-        self.state().entries.insert(key, entry);
-    }
-
-    pub fn get(&self, key: &str) -> Result<Option<String>, WrongType> {
-        let mut state = self.state();
-        drop_if_expired(&mut state.entries, key);
-
-        match state.entries.get(key) {
-            None => Ok(None),
-            Some(Entry {
-                data: Data::String(value),
-                ..
-            }) => Ok(Some(value.clone())),
-            Some(_) => Err(WrongType),
-        }
-    }
-
     /// Adds to the list at `key`, creating it first if it does not exist, and
     /// returns the list's new length.
     pub fn push(&self, key: &str, elements: &[String], side: Side) -> Result<usize, WrongType> {
@@ -164,14 +124,6 @@ impl Store {
         let mut state = self.state();
         Ok(list_at(&mut state.entries, key)?.map_or(0, Vec::len))
     }
-
-    fn state(&self) -> MutexGuard<'_, State> {
-        // A panic elsewhere poisons the lock but leaves the state intact, so
-        // recover rather than taking down every other connection with it.
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 }
 
 impl State {
@@ -251,36 +203,5 @@ fn resolve_index(index: i64, len: usize) -> usize {
         index as usize
     } else {
         len.saturating_sub(index.unsigned_abs() as usize)
-    }
-}
-
-/// Redis expires keys lazily, so drop this one now that we are looking at it.
-fn drop_if_expired(entries: &mut Entries, key: &str) {
-    if entries.get(key).is_some_and(Entry::has_expired) {
-        entries.remove(key);
-    }
-}
-
-pub struct Entry {
-    data: Data,
-    expires_at: Option<Instant>,
-}
-
-enum Data {
-    String(String),
-    List(Vec<String>),
-}
-
-impl Entry {
-    fn new(data: Data) -> Self {
-        Self {
-            data,
-            expires_at: None,
-        }
-    }
-
-    fn has_expired(&self) -> bool {
-        self.expires_at
-            .is_some_and(|deadline| Instant::now() >= deadline)
     }
 }

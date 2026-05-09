@@ -1,3 +1,5 @@
+//! Behaviour of the connection loop itself, independent of any data type.
+
 mod common;
 
 use common::Server;
@@ -44,4 +46,16 @@ fn serves_concurrent_clients() {
     for client in &mut clients {
         client.expect_reply("+PONG\r\n");
     }
+}
+
+#[test]
+fn rejects_an_unknown_command_without_dropping_the_connection() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["NOPE"]);
+    client.expect_reply("-ERR unknown command 'NOPE'\r\n");
+
+    client.send(&["PING"]);
+    client.expect_reply("+PONG\r\n");
 }

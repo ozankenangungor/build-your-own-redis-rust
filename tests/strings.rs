@@ -3,6 +3,26 @@ mod common;
 use common::Server;
 
 #[test]
+fn echoes_its_argument() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ECHO", "hey"]);
+    client.expect_reply("$3\r\nhey\r\n");
+}
+
+#[test]
+fn accepts_any_casing_of_the_command_name() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for name in ["ECHO", "echo", "EcHo"] {
+        client.send(&[name, "hey"]);
+        client.expect_reply("$3\r\nhey\r\n");
+    }
+}
+
+#[test]
 fn sets_then_gets_a_key() {
     let server = Server::start();
     let mut client = server.connect();
