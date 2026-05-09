@@ -1,3 +1,4 @@
+mod keys;
 mod lists;
 mod strings;
 
@@ -22,6 +23,9 @@ pub async fn run(command: Value, store: &Store) -> Value {
         return reply;
     }
     if let Some(reply) = lists::run(&uppercased, args, store).await {
+        return reply;
+    }
+    if let Some(reply) = keys::run(&uppercased, args, store) {
         return reply;
     }
 

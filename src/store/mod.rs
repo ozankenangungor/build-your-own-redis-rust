@@ -18,6 +18,13 @@ pub struct Store(Arc<Mutex<State>>);
 /// Returned when a command is used on a key holding another type of value.
 pub struct WrongType;
 
+/// The kind of value a key holds, or `None` when there is no such key.
+pub enum Kind {
+    None,
+    String,
+    List,
+}
+
 #[derive(Default)]
 struct State {
     entries: Entries,
@@ -29,6 +36,25 @@ struct State {
 type Entries = HashMap<String, Entry>;
 
 impl Store {
+    /// Reports what `key` holds. This is the one lookup that never fails on a
+    /// type mismatch, since telling them apart is the whole point.
+    pub fn kind(&self, key: &str) -> Kind {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        match state.entries.get(key) {
+            None => Kind::None,
+            Some(Entry {
+                data: Data::String(_),
+                ..
+            }) => Kind::String,
+            Some(Entry {
+                data: Data::List(_),
+                ..
+            }) => Kind::List,
+        }
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         // A panic elsewhere poisons the lock but leaves the state intact, so
         // recover rather than taking down every other connection with it.
