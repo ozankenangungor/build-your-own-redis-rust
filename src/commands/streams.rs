@@ -1,6 +1,6 @@
 use super::{wrong_arity, wrong_type};
 use crate::resp::Value;
-use crate::store::{EntryId, Store, WrongType};
+use crate::store::{EntryId, Store, XaddError};
 
 /// Handles the commands that work on streams. `None` means the command belongs
 /// to another module.
@@ -31,7 +31,14 @@ fn xadd(store: &Store, key: &str, id: &str, fields: &[String]) -> Value {
 
     match store.xadd(key, id, fields) {
         Ok(id) => Value::BulkString(id.to_string()),
-        Err(WrongType) => wrong_type(),
+        Err(XaddError::WrongType) => wrong_type(),
+        Err(XaddError::NotAboveZero) => {
+            Value::Error("ERR The ID specified in XADD must be greater than 0-0".into())
+        }
+        Err(XaddError::NotAboveTop) => Value::Error(
+            "ERR The ID specified in XADD is equal or smaller than the target stream top item"
+                .into(),
+        ),
     }
 }
 

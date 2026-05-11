@@ -1,4 +1,4 @@
-use super::{Data, Entry, Store, WrongType, drop_if_expired};
+use super::{Data, Entry, Store, drop_if_expired};
 use std::fmt;
 use std::str::FromStr;
 
@@ -11,13 +11,29 @@ pub struct EntryId {
 }
 
 /// One entry of a stream: an id and the field-value pairs recorded under it.
-// Entries are only written so far; the commands that read them back, and the
-// validation that compares ids, arrive in the stages after this one.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct StreamEntry {
     pub id: EntryId,
+    /// Read back by the stream query commands, which come in later stages.
+    #[allow(dead_code)]
     pub fields: Vec<(String, String)>,
+}
+
+/// Why an `XADD` was refused.
+pub enum XaddError {
+    WrongType,
+    /// Ids have to be strictly greater than `0-0`.
+    NotAboveZero,
+    /// Ids have to be strictly greater than the stream's last entry.
+    NotAboveTop,
+}
+
+impl EntryId {
+    /// The lower bound every id has to beat; `0-1` is the smallest valid id.
+    pub const ZERO: Self = Self {
+        milliseconds: 0,
+        sequence: 0,
+    };
 }
 
 impl fmt::Display for EntryId {
@@ -43,12 +59,19 @@ impl FromStr for EntryId {
 impl Store {
     /// Appends an entry to the stream at `key`, creating the stream if it does
     /// not exist yet, and returns the id it was stored under.
+    ///
+    /// Ids have to arrive in strictly increasing order, which is what makes a
+    /// stream a log rather than a bag of entries.
     pub fn xadd(
         &self,
         key: &str,
         id: EntryId,
         fields: Vec<(String, String)>,
-    ) -> Result<EntryId, WrongType> {
+    ) -> Result<EntryId, XaddError> {
+        if id <= EntryId::ZERO {
+            return Err(XaddError::NotAboveZero);
+        }
+
         let mut state = self.state();
         drop_if_expired(&mut state.entries, key);
 
@@ -58,8 +81,14 @@ impl Store {
             .or_insert_with(|| Entry::new(Data::Stream(Vec::new())));
 
         let Data::Stream(stream) = &mut entry.data else {
-            return Err(WrongType);
+            return Err(XaddError::WrongType);
         };
+
+        if let Some(top) = stream.last()
+            && id <= top.id
+        {
+            return Err(XaddError::NotAboveTop);
+        }
 
         stream.push(StreamEntry { id, fields });
         Ok(id)
