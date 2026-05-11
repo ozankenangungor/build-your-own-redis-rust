@@ -22,5 +22,6 @@ fn type_name(kind: Kind) -> &'static str {
         Kind::None => "none",
         Kind::String => "string",
         Kind::List => "list",
+        Kind::Stream => "stream",
     }
 }

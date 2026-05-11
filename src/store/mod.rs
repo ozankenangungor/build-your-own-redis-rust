@@ -1,7 +1,9 @@
 mod lists;
+mod streams;
 mod strings;
 
 pub use lists::{Blocked, Side};
+pub use streams::EntryId;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -23,6 +25,7 @@ pub enum Kind {
     None,
     String,
     List,
+    Stream,
 }
 
 #[derive(Default)]
@@ -52,6 +55,10 @@ impl Store {
                 data: Data::List(_),
                 ..
             }) => Kind::List,
+            Some(Entry {
+                data: Data::Stream(_),
+                ..
+            }) => Kind::Stream,
         }
     }
 
@@ -72,6 +79,7 @@ struct Entry {
 enum Data {
     String(String),
     List(Vec<String>),
+    Stream(Vec<streams::StreamEntry>),
 }
 
 impl Entry {
