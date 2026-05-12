@@ -19,6 +19,30 @@ pub struct StreamEntry {
     pub fields: Vec<(String, String)>,
 }
 
+/// Fills in the parts of `requested` the client left to us, given the id of the
+/// stream's last entry.
+fn resolve(requested: RequestedId, top: Option<EntryId>) -> Result<EntryId, XaddError> {
+    let milliseconds = match requested {
+        RequestedId::Explicit(id) => return Ok(id),
+        RequestedId::AutoSequence(milliseconds) => milliseconds,
+    };
+
+    let sequence = match top {
+        // Carry on the run of entries recorded in this same millisecond.
+        Some(top) if top.milliseconds == milliseconds => {
+            top.sequence.checked_add(1).ok_or(XaddError::NotAboveTop)?
+        }
+        // `0-0` is not a valid id, so the first sequence at time zero is one.
+        _ if milliseconds == 0 => 1,
+        _ => 0,
+    };
+
+    Ok(EntryId {
+        milliseconds,
+        sequence,
+    })
+}
+
 /// Why an `XADD` was refused.
 pub enum XaddError {
     WrongType,
@@ -42,17 +66,30 @@ impl fmt::Display for EntryId {
     }
 }
 
-/// Ids arrive as `<milliseconds>-<sequence>`; anything else is malformed.
-impl FromStr for EntryId {
+/// The id an `XADD` asked for, which may leave part of it to the server.
+pub enum RequestedId {
+    Explicit(EntryId),
+    /// The timestamp is given and the sequence number is ours to pick.
+    AutoSequence(u64),
+}
+
+/// Ids arrive as `<milliseconds>-<sequence>`, where the sequence number may be
+/// `*`. Anything else is malformed.
+impl FromStr for RequestedId {
     type Err = ();
 
     fn from_str(id: &str) -> Result<Self, Self::Err> {
         let (milliseconds, sequence) = id.split_once('-').ok_or(())?;
+        let milliseconds = milliseconds.parse().map_err(|_| ())?;
 
-        Ok(Self {
-            milliseconds: milliseconds.parse().map_err(|_| ())?,
+        if sequence == "*" {
+            return Ok(Self::AutoSequence(milliseconds));
+        }
+
+        Ok(Self::Explicit(EntryId {
+            milliseconds,
             sequence: sequence.parse().map_err(|_| ())?,
-        })
+        }))
     }
 }
 
@@ -65,10 +102,13 @@ impl Store {
     pub fn xadd(
         &self,
         key: &str,
-        id: EntryId,
+        requested: RequestedId,
         fields: Vec<(String, String)>,
     ) -> Result<EntryId, XaddError> {
-        if id <= EntryId::ZERO {
+        // Redis rejects `0-0` before it ever looks at the key.
+        if let RequestedId::Explicit(id) = requested
+            && id <= EntryId::ZERO
+        {
             return Err(XaddError::NotAboveZero);
         }
 
@@ -84,9 +124,10 @@ impl Store {
             return Err(XaddError::WrongType);
         };
 
-        if let Some(top) = stream.last()
-            && id <= top.id
-        {
+        let top = stream.last().map(|entry| entry.id);
+        let id = resolve(requested, top)?;
+
+        if top.is_some_and(|top| id <= top) {
             return Err(XaddError::NotAboveTop);
         }
 

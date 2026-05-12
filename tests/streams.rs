@@ -106,6 +106,66 @@ fn refuses_the_zero_id_even_on_a_string_key() {
 }
 
 #[test]
+fn generates_a_sequence_number_starting_at_zero() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["XADD", "stream_key", "5-*", "foo", "bar"]);
+    client.expect_reply("$3\r\n5-0\r\n");
+
+    client.send(&["XADD", "stream_key", "5-*", "bar", "baz"]);
+    client.expect_reply("$3\r\n5-1\r\n");
+}
+
+#[test]
+fn generates_a_sequence_number_starting_at_one_for_time_zero() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["XADD", "stream_key", "0-*", "foo", "bar"]);
+    client.expect_reply("$3\r\n0-1\r\n");
+
+    client.send(&["XADD", "stream_key", "0-*", "bar", "baz"]);
+    client.expect_reply("$3\r\n0-2\r\n");
+}
+
+#[test]
+fn continues_the_sequence_of_an_explicit_entry() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["XADD", "stream_key", "5-3", "foo", "bar"]);
+    client.expect_reply("$3\r\n5-3\r\n");
+
+    client.send(&["XADD", "stream_key", "5-*", "bar", "baz"]);
+    client.expect_reply("$3\r\n5-4\r\n");
+}
+
+#[test]
+fn restarts_the_sequence_for_a_later_millisecond() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["XADD", "stream_key", "5-*", "foo", "bar"]);
+    client.expect_reply("$3\r\n5-0\r\n");
+
+    client.send(&["XADD", "stream_key", "6-*", "bar", "baz"]);
+    client.expect_reply("$3\r\n6-0\r\n");
+}
+
+#[test]
+fn rejects_a_generated_id_that_lands_below_the_top() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["XADD", "stream_key", "5-0", "foo", "bar"]);
+    client.expect_reply("$3\r\n5-0\r\n");
+
+    client.send(&["XADD", "stream_key", "1-*", "bar", "baz"]);
+    client.expect_reply(TOP_ITEM);
+}
+
+#[test]
 fn rejects_a_malformed_entry_id() {
     let server = Server::start();
     let mut client = server.connect();

@@ -1,6 +1,6 @@
 use super::{wrong_arity, wrong_type};
 use crate::resp::Value;
-use crate::store::{EntryId, Store, XaddError};
+use crate::store::{RequestedId, Store, XaddError};
 
 /// Handles the commands that work on streams. `None` means the command belongs
 /// to another module.
@@ -20,7 +20,7 @@ pub fn run(command: &str, args: &[String], store: &Store) -> Option<Value> {
 }
 
 fn xadd(store: &Store, key: &str, id: &str, fields: &[String]) -> Value {
-    let Ok(id) = id.parse::<EntryId>() else {
+    let Ok(id) = id.parse::<RequestedId>() else {
         return invalid_id();
     };
 
