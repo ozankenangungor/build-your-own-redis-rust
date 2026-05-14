@@ -1,6 +1,7 @@
 use super::{Data, Entry, Store, drop_if_expired};
 use std::fmt;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The identifier of a stream entry: a millisecond timestamp and a sequence
 /// number that orders entries recorded within the same millisecond.
@@ -25,6 +26,11 @@ fn resolve(requested: RequestedId, top: Option<EntryId>) -> Result<EntryId, Xadd
     let milliseconds = match requested {
         RequestedId::Explicit(id) => return Ok(id),
         RequestedId::AutoSequence(milliseconds) => milliseconds,
+        // Ids may never move backwards, even when the system clock does.
+        RequestedId::Auto => {
+            let now = now_milliseconds();
+            top.map_or(now, |top| now.max(top.milliseconds))
+        }
     };
 
     let sequence = match top {
@@ -41,6 +47,15 @@ fn resolve(requested: RequestedId, top: Option<EntryId>) -> Result<EntryId, Xadd
         milliseconds,
         sequence,
     })
+}
+
+/// The timestamp half of a generated id is the current Unix time, in the same
+/// milliseconds the ids themselves are counted in.
+fn now_milliseconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Why an `XADD` was refused.
@@ -71,14 +86,20 @@ pub enum RequestedId {
     Explicit(EntryId),
     /// The timestamp is given and the sequence number is ours to pick.
     AutoSequence(u64),
+    /// Both halves are ours to pick.
+    Auto,
 }
 
 /// Ids arrive as `<milliseconds>-<sequence>`, where the sequence number may be
-/// `*`. Anything else is malformed.
+/// `*`, or as a bare `*`. Anything else is malformed.
 impl FromStr for RequestedId {
     type Err = ();
 
     fn from_str(id: &str) -> Result<Self, Self::Err> {
+        if id == "*" {
+            return Ok(Self::Auto);
+        }
+
         let (milliseconds, sequence) = id.split_once('-').ok_or(())?;
         let milliseconds = milliseconds.parse().map_err(|_| ())?;
 

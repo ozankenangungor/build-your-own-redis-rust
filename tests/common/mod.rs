@@ -88,4 +88,34 @@ impl Client {
         self.0.read_exact(&mut buf).expect("failed to read reply");
         assert_eq!(String::from_utf8_lossy(&buf), expected);
     }
+
+    /// Reads a bulk string reply and returns its contents, for the replies whose
+    /// exact bytes cannot be known in advance.
+    pub fn read_bulk_string(&mut self) -> String {
+        let header = self.read_line();
+        let length: usize = header
+            .strip_prefix('$')
+            .unwrap_or_else(|| panic!("expected a bulk string, got {header:?}"))
+            .parse()
+            .expect("bulk string length");
+
+        let mut buf = vec![0u8; length + 2];
+        self.0.read_exact(&mut buf).expect("failed to read reply");
+
+        String::from_utf8_lossy(&buf[..length]).into_owned()
+    }
+
+    fn read_line(&mut self) -> String {
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+
+        loop {
+            self.0.read_exact(&mut byte).expect("failed to read reply");
+            if byte[0] == b'\r' {
+                self.0.read_exact(&mut byte).expect("failed to read reply");
+                return String::from_utf8_lossy(&line).into_owned();
+            }
+            line.push(byte[0]);
+        }
+    }
 }

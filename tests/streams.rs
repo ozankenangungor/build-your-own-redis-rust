@@ -1,6 +1,7 @@
 mod common;
 
-use common::Server;
+use common::{Client, Server};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const TOP_ITEM: &str =
     "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
@@ -163,6 +164,62 @@ fn rejects_a_generated_id_that_lands_below_the_top() {
 
     client.send(&["XADD", "stream_key", "1-*", "bar", "baz"]);
     client.expect_reply(TOP_ITEM);
+}
+
+fn unix_milliseconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is past the epoch")
+        .as_millis() as u64
+}
+
+/// Appends an entry with a fully generated id and returns its two halves.
+fn add_generated(client: &mut Client) -> (u64, u64) {
+    client.send(&["XADD", "stream_key", "*", "foo", "bar"]);
+    let id = client.read_bulk_string();
+
+    let (milliseconds, sequence) = id
+        .split_once('-')
+        .unwrap_or_else(|| panic!("bad id {id:?}"));
+
+    (
+        milliseconds.parse().expect("a timestamp"),
+        sequence.parse().expect("a sequence number"),
+    )
+}
+
+#[test]
+fn generates_the_whole_id_from_the_clock() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    let before = unix_milliseconds();
+    let (milliseconds, sequence) = add_generated(&mut client);
+    let after = unix_milliseconds();
+
+    assert_eq!(sequence, 0);
+    assert!(
+        (before..=after).contains(&milliseconds),
+        "{milliseconds} is not within {before}..={after}"
+    );
+}
+
+#[test]
+fn keeps_generated_ids_increasing() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    // Several of these usually land in the same millisecond, which is the case
+    // that has to fall back to bumping the sequence number.
+    let mut previous = add_generated(&mut client);
+    for _ in 0..20 {
+        let current = add_generated(&mut client);
+        assert!(
+            current > previous,
+            "{current:?} does not follow {previous:?}"
+        );
+        previous = current;
+    }
 }
 
 #[test]
