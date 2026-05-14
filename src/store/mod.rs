@@ -3,7 +3,7 @@ mod streams;
 mod strings;
 
 pub use lists::{Blocked, Side};
-pub use streams::{RequestedId, XaddError};
+pub use streams::{EntryId, RequestedId, StreamEntry, XaddError};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};

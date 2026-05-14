@@ -1,4 +1,4 @@
-use super::{Data, Entry, Store, drop_if_expired};
+use super::{Data, Entry, Store, WrongType, drop_if_expired};
 use std::fmt;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,11 +12,9 @@ pub struct EntryId {
 }
 
 /// One entry of a stream: an id and the field-value pairs recorded under it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StreamEntry {
     pub id: EntryId,
-    /// Read back by the stream query commands, which come in later stages.
-    #[allow(dead_code)]
     pub fields: Vec<(String, String)>,
 }
 
@@ -154,5 +152,33 @@ impl Store {
 
         stream.push(StreamEntry { id, fields });
         Ok(id)
+    }
+
+    /// Returns the entries of the stream at `key` whose ids fall between
+    /// `start` and `end`, both included.
+    pub fn xrange(
+        &self,
+        key: &str,
+        start: EntryId,
+        end: EntryId,
+    ) -> Result<Vec<StreamEntry>, WrongType> {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        let stream = match state.entries.get(key) {
+            None => return Ok(Vec::new()),
+            Some(Entry {
+                data: Data::Stream(stream),
+                ..
+            }) => stream,
+            Some(_) => return Err(WrongType),
+        };
+
+        // Entries are appended in increasing id order, so the range asked for
+        // is a contiguous slice that binary search can find.
+        let first = stream.partition_point(|entry| entry.id < start);
+        let last = stream.partition_point(|entry| entry.id <= end);
+
+        Ok(stream[first..last].to_vec())
     }
 }
