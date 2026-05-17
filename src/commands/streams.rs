@@ -17,6 +17,11 @@ pub fn run(command: &str, args: &[String], store: &Store) -> Option<Value> {
             [key, start, end] => xrange(store, key, start, end),
             _ => wrong_arity("xrange"),
         },
+        "XREAD" => match args {
+            [streams, key, id] if streams.eq_ignore_ascii_case("STREAMS") => xread(store, key, id),
+            [_, _, _] => Value::Error("ERR syntax error".into()),
+            _ => wrong_arity("xread"),
+        },
         _ => return None,
     };
 
@@ -59,18 +64,38 @@ fn xrange(store: &Store, key: &str, start: &str, end: &str) -> Value {
     }
 }
 
-fn parse_bound(bound: &str, missing_sequence: u64) -> Option<EntryId> {
-    // `-` and `+` stand for the two ends of the stream, so a range can be asked
-    // for without knowing the ids of the first and last entries.
-    match bound {
-        "-" => return Some(EntryId::ZERO),
-        "+" => return Some(EntryId::MAX),
-        _ => {}
-    }
+/// Reads entries recorded after `id`, which `XREAD` treats as exclusive.
+fn xread(store: &Store, key: &str, id: &str) -> Value {
+    let Some(after) = parse_id(id, 0) else {
+        return invalid_id();
+    };
 
-    let (milliseconds, sequence) = match bound.split_once('-') {
+    match store.xread(key, after) {
+        // A stream with nothing new is left out of the reply entirely, which
+        // for a single stream leaves nothing to report.
+        Ok(entries) if entries.is_empty() => Value::NullArray,
+        Ok(entries) => Value::Array(vec![Value::Array(vec![
+            Value::BulkString(key.to_string()),
+            Value::Array(entries.into_iter().map(encode_entry).collect()),
+        ])]),
+        Err(WrongType) => wrong_type(),
+    }
+}
+
+/// `XRANGE` also accepts the two ends of the stream in place of an id, so that
+/// a range can be asked for without knowing the first and last ids.
+fn parse_bound(bound: &str, missing_sequence: u64) -> Option<EntryId> {
+    match bound {
+        "-" => Some(EntryId::ZERO),
+        "+" => Some(EntryId::MAX),
+        _ => parse_id(bound, missing_sequence),
+    }
+}
+
+fn parse_id(id: &str, missing_sequence: u64) -> Option<EntryId> {
+    let (milliseconds, sequence) = match id.split_once('-') {
         Some((milliseconds, sequence)) => (milliseconds, sequence.parse().ok()?),
-        None => (bound, missing_sequence),
+        None => (id, missing_sequence),
     };
 
     Some(EntryId {

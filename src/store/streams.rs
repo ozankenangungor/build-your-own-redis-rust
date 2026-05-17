@@ -1,4 +1,4 @@
-use super::{Data, Entry, Store, WrongType, drop_if_expired};
+use super::{Data, Entries, Entry, Store, WrongType, drop_if_expired};
 use std::fmt;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -169,15 +169,8 @@ impl Store {
         end: EntryId,
     ) -> Result<Vec<StreamEntry>, WrongType> {
         let mut state = self.state();
-        drop_if_expired(&mut state.entries, key);
-
-        let stream = match state.entries.get(key) {
-            None => return Ok(Vec::new()),
-            Some(Entry {
-                data: Data::Stream(stream),
-                ..
-            }) => stream,
-            Some(_) => return Err(WrongType),
+        let Some(stream) = stream_at(&mut state.entries, key)? else {
+            return Ok(Vec::new());
         };
 
         // Entries are appended in increasing id order, so the range asked for
@@ -186,5 +179,35 @@ impl Store {
         let last = stream.partition_point(|entry| entry.id <= end);
 
         Ok(stream[first..last].to_vec())
+    }
+
+    /// Returns the entries of the stream at `key` recorded after `id`. Unlike
+    /// `XRANGE`, the entry carrying that id is not itself included.
+    pub fn xread(&self, key: &str, after: EntryId) -> Result<Vec<StreamEntry>, WrongType> {
+        let mut state = self.state();
+        let Some(stream) = stream_at(&mut state.entries, key)? else {
+            return Ok(Vec::new());
+        };
+
+        let first = stream.partition_point(|entry| entry.id <= after);
+        Ok(stream[first..].to_vec())
+    }
+}
+
+/// Looks up the stream stored at `key`. `Ok(None)` means the key is absent,
+/// which the query commands treat as an empty stream rather than an error.
+fn stream_at<'a>(
+    entries: &'a mut Entries,
+    key: &str,
+) -> Result<Option<&'a Vec<StreamEntry>>, WrongType> {
+    drop_if_expired(entries, key);
+
+    match entries.get(key) {
+        None => Ok(None),
+        Some(Entry {
+            data: Data::Stream(stream),
+            ..
+        }) => Ok(Some(stream)),
+        Some(_) => Err(WrongType),
     }
 }

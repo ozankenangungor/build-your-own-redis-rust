@@ -318,6 +318,82 @@ fn rejects_a_stream_range_over_a_list() {
     client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
 }
 
+#[test]
+fn reads_the_entries_recorded_after_an_id() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["XADD", "stream_key", "0-1", "temperature", "96"]);
+    client.expect_reply("$3\r\n0-1\r\n");
+
+    client.send(&["XREAD", "STREAMS", "stream_key", "0-0"]);
+    client.expect_reply(concat!(
+        "*1\r\n*2\r\n$10\r\nstream_key\r\n",
+        "*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$11\r\ntemperature\r\n$2\r\n96\r\n",
+    ));
+}
+
+#[test]
+fn leaves_out_the_entry_carrying_the_given_id() {
+    let server = Server::start();
+    let mut client = three_entries(&server);
+
+    // Unlike XRANGE, the entry named by the id is not part of the reply.
+    client.send(&["XREAD", "STREAMS", "stream_key", "0-2"]);
+    client.expect_reply(concat!(
+        "*1\r\n*2\r\n$10\r\nstream_key\r\n",
+        "*1\r\n*2\r\n$3\r\n0-3\r\n*2\r\n$3\r\nbaz\r\n$3\r\nfoo\r\n",
+    ));
+}
+
+#[test]
+fn replies_with_nothing_when_no_entry_is_newer() {
+    let server = Server::start();
+    let mut client = three_entries(&server);
+
+    client.send(&["XREAD", "STREAMS", "stream_key", "0-3"]);
+    client.expect_reply("*-1\r\n");
+
+    client.send(&["XREAD", "STREAMS", "missing_stream", "0-0"]);
+    client.expect_reply("*-1\r\n");
+}
+
+#[test]
+fn accepts_any_casing_of_the_streams_keyword() {
+    let server = Server::start();
+    let mut client = three_entries(&server);
+
+    client.send(&["XREAD", "streams", "stream_key", "0-2"]);
+    client.expect_reply(concat!(
+        "*1\r\n*2\r\n$10\r\nstream_key\r\n",
+        "*1\r\n*2\r\n$3\r\n0-3\r\n*2\r\n$3\r\nbaz\r\n$3\r\nfoo\r\n",
+    ));
+}
+
+#[test]
+fn rejects_a_read_without_the_streams_keyword() {
+    let server = Server::start();
+    let mut client = three_entries(&server);
+
+    client.send(&["XREAD", "COUNT", "stream_key", "0-0"]);
+    client.expect_reply("-ERR syntax error\r\n");
+
+    client.send(&["XREAD", "STREAMS", "stream_key"]);
+    client.expect_reply("-ERR wrong number of arguments for 'xread' command\r\n");
+}
+
+#[test]
+fn rejects_a_stream_read_over_a_list() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["RPUSH", "list_key", "element"]);
+    client.expect_reply(":1\r\n");
+
+    client.send(&["XREAD", "STREAMS", "list_key", "0-0"]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
 fn unix_milliseconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
