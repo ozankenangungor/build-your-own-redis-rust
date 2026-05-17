@@ -259,6 +259,33 @@ fn queries_from_the_start_of_the_stream_with_a_dash() {
 }
 
 #[test]
+fn queries_to_the_end_of_the_stream_with_a_plus() {
+    let server = Server::start();
+    let mut client = three_entries(&server);
+
+    client.send(&["XRANGE", "stream_key", "0-2", "+"]);
+    client.expect_reply(concat!(
+        "*2\r\n",
+        "*2\r\n$3\r\n0-2\r\n*2\r\n$3\r\nbar\r\n$3\r\nbaz\r\n",
+        "*2\r\n$3\r\n0-3\r\n*2\r\n$3\r\nbaz\r\n$3\r\nfoo\r\n",
+    ));
+}
+
+#[test]
+fn queries_the_whole_stream_with_both_ends() {
+    let server = Server::start();
+    let mut client = three_entries(&server);
+
+    client.send(&["XRANGE", "stream_key", "-", "+"]);
+    client.expect_reply(concat!(
+        "*3\r\n",
+        "*2\r\n$3\r\n0-1\r\n*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n",
+        "*2\r\n$3\r\n0-2\r\n*2\r\n$3\r\nbar\r\n$3\r\nbaz\r\n",
+        "*2\r\n$3\r\n0-3\r\n*2\r\n$3\r\nbaz\r\n$3\r\nfoo\r\n",
+    ));
+}
+
+#[test]
 fn returns_an_empty_array_when_nothing_is_in_range() {
     let server = Server::start();
     let mut client = three_entries(&server);

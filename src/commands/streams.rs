@@ -60,10 +60,12 @@ fn xrange(store: &Store, key: &str, start: &str, end: &str) -> Value {
 }
 
 fn parse_bound(bound: &str, missing_sequence: u64) -> Option<EntryId> {
-    // `-` stands for the very beginning of the stream, so that a range can be
-    // asked for without knowing the id of the first entry.
-    if bound == "-" {
-        return Some(EntryId::ZERO);
+    // `-` and `+` stand for the two ends of the stream, so a range can be asked
+    // for without knowing the ids of the first and last entries.
+    match bound {
+        "-" => return Some(EntryId::ZERO),
+        "+" => return Some(EntryId::MAX),
+        _ => {}
     }
 
     let (milliseconds, sequence) = match bound.split_once('-') {

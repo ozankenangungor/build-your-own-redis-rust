@@ -71,6 +71,12 @@ impl EntryId {
         milliseconds: 0,
         sequence: 0,
     };
+
+    /// The largest id there is, and so an upper bound no entry can pass.
+    pub const MAX: Self = Self {
+        milliseconds: u64::MAX,
+        sequence: u64::MAX,
+    };
 }
 
 impl fmt::Display for EntryId {
