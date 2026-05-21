@@ -26,7 +26,7 @@ pub async fn run(command: Value, store: &Store) -> Value {
     if let Some(reply) = lists::run(&uppercased, args, store).await {
         return reply;
     }
-    if let Some(reply) = streams::run(&uppercased, args, store) {
+    if let Some(reply) = streams::run(&uppercased, args, store).await {
         return reply;
     }
     if let Some(reply) = keys::run(&uppercased, args, store) {

@@ -3,12 +3,12 @@ mod streams;
 mod strings;
 
 pub use lists::{Blocked, Side};
-pub use streams::{EntryId, RequestedId, StreamEntry, XaddError};
+pub use streams::{EntryId, ReadStream, RequestedId, StreamEntry, StreamRead, XaddError};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 
 /// The key-value store, shared by every connection.
 ///
@@ -34,6 +34,9 @@ struct State {
     /// Clients blocked on a key, in the order they started waiting. Only the
     /// list commands use these, but they have to share the lock with `entries`.
     waiters: HashMap<String, VecDeque<oneshot::Sender<String>>>,
+    /// Clients waiting for a stream to grow. Every one of them is woken, since
+    /// reading an entry does not take it away from the others.
+    watchers: HashMap<String, Vec<Arc<Notify>>>,
 }
 
 type Entries = HashMap<String, Entry>;

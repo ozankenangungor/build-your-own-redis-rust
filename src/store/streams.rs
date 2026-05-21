@@ -1,7 +1,9 @@
-use super::{Data, Entries, Entry, Store, WrongType, drop_if_expired};
+use super::{Data, Entries, Entry, State, Store, WrongType, drop_if_expired};
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Notify;
 
 /// The identifier of a stream entry: a millisecond timestamp and a sequence
 /// number that orders entries recorded within the same millisecond.
@@ -54,6 +56,16 @@ fn now_milliseconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// A stream's key together with the entries read from it.
+pub type ReadStream = (String, Vec<StreamEntry>);
+
+/// The outcome of a blocking read: either something was there, or the caller
+/// has a waker that fires once one of the streams grows.
+pub enum StreamRead {
+    Ready(Vec<ReadStream>),
+    Waiting(Arc<Notify>),
 }
 
 /// Why an `XADD` was refused.
@@ -157,6 +169,8 @@ impl Store {
         }
 
         stream.push(StreamEntry { id, fields });
+        state.wake_watchers(key);
+
         Ok(id)
     }
 
@@ -181,17 +195,66 @@ impl Store {
         Ok(stream[first..last].to_vec())
     }
 
-    /// Returns the entries of the stream at `key` recorded after `id`. Unlike
-    /// `XRANGE`, the entry carrying that id is not itself included.
-    pub fn xread(&self, key: &str, after: EntryId) -> Result<Vec<StreamEntry>, WrongType> {
+    /// Returns the entries recorded after the given id in each stream. Unlike
+    /// `XRANGE`, the entry carrying that id is not itself included, and streams
+    /// with nothing new are left out.
+    pub fn xread(&self, reads: &[(String, EntryId)]) -> Result<Vec<ReadStream>, WrongType> {
         let mut state = self.state();
-        let Some(stream) = stream_at(&mut state.entries, key)? else {
-            return Ok(Vec::new());
+        read(&mut state.entries, reads)
+    }
+
+    /// The same read, except that coming back empty leaves a watcher on every
+    /// key, which fires as soon as any of them grows.
+    pub fn xread_or_watch(&self, reads: &[(String, EntryId)]) -> Result<StreamRead, WrongType> {
+        let mut guard = self.state();
+        let state = &mut *guard;
+
+        let streams = read(&mut state.entries, reads)?;
+        if !streams.is_empty() {
+            return Ok(StreamRead::Ready(streams));
+        }
+
+        // Registering before the lock goes away is what keeps an entry appended
+        // right now from slipping past the client.
+        let waker = Arc::new(Notify::new());
+        for (key, _) in reads {
+            state
+                .watchers
+                .entry(key.clone())
+                .or_default()
+                .push(waker.clone());
+        }
+
+        Ok(StreamRead::Waiting(waker))
+    }
+}
+
+impl State {
+    /// Tells every client waiting on `key` that the stream has grown.
+    fn wake_watchers(&mut self, key: &str) {
+        for waker in self.watchers.remove(key).unwrap_or_default() {
+            // Each waker belongs to a single client, so a permit is kept for
+            // one that has not started waiting yet.
+            waker.notify_one();
+        }
+    }
+}
+
+fn read(entries: &mut Entries, reads: &[(String, EntryId)]) -> Result<Vec<ReadStream>, WrongType> {
+    let mut streams = Vec::new();
+
+    for (key, after) in reads {
+        let Some(stream) = stream_at(entries, key)? else {
+            continue;
         };
 
-        let first = stream.partition_point(|entry| entry.id <= after);
-        Ok(stream[first..].to_vec())
+        let first = stream.partition_point(|entry| entry.id <= *after);
+        if first < stream.len() {
+            streams.push((key.clone(), stream[first..].to_vec()));
+        }
     }
+
+    Ok(streams)
 }
 
 /// Looks up the stream stored at `key`. `Ok(None)` means the key is absent,

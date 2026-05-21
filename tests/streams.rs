@@ -1,7 +1,12 @@
 mod common;
 
 use common::{Client, Server};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread::sleep;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Long enough for the server to have registered a blocking read before the
+/// next command is sent, so the tests exercise the waiting path.
+const SETTLE: Duration = Duration::from_millis(100);
 
 const TOP_ITEM: &str =
     "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
@@ -462,6 +467,98 @@ fn rejects_a_stream_read_over_a_list() {
 
     client.send(&["XREAD", "STREAMS", "list_key", "0-0"]);
     client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
+#[test]
+fn a_blocking_read_returns_what_is_already_there() {
+    let server = Server::start();
+    let mut client = three_entries(&server);
+
+    client.send(&["XREAD", "BLOCK", "1000", "STREAMS", "stream_key", "0-2"]);
+    client.expect_reply(concat!(
+        "*1\r\n*2\r\n$10\r\nstream_key\r\n",
+        "*1\r\n*2\r\n$3\r\n0-3\r\n*2\r\n$3\r\nbaz\r\n$3\r\nfoo\r\n",
+    ));
+}
+
+#[test]
+fn a_blocking_read_waits_for_an_entry_to_arrive() {
+    let server = Server::start();
+    let mut blocked = server.connect();
+    let mut writer = server.connect();
+
+    writer.send(&["XADD", "stream_key", "0-1", "temperature", "96"]);
+    writer.expect_reply("$3\r\n0-1\r\n");
+
+    blocked.send(&["XREAD", "BLOCK", "1000", "STREAMS", "stream_key", "0-1"]);
+    sleep(SETTLE);
+
+    writer.send(&["XADD", "stream_key", "0-2", "temperature", "95"]);
+    writer.expect_reply("$3\r\n0-2\r\n");
+
+    blocked.expect_reply(concat!(
+        "*1\r\n*2\r\n$10\r\nstream_key\r\n",
+        "*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$11\r\ntemperature\r\n$2\r\n95\r\n",
+    ));
+}
+
+#[test]
+fn a_blocking_read_gives_up_once_the_timeout_passes() {
+    let server = Server::start();
+    let mut client = three_entries(&server);
+
+    client.send(&["XREAD", "BLOCK", "100", "STREAMS", "stream_key", "0-3"]);
+    client.expect_reply("*-1\r\n");
+}
+
+#[test]
+fn one_entry_wakes_every_blocked_reader() {
+    let server = Server::start();
+    let mut first = server.connect();
+    let mut second = server.connect();
+    let mut writer = server.connect();
+
+    // Reading an entry does not consume it, so both clients get to see it.
+    first.send(&["XREAD", "BLOCK", "1000", "STREAMS", "stream_key", "0-0"]);
+    second.send(&["XREAD", "BLOCK", "1000", "STREAMS", "stream_key", "0-0"]);
+    sleep(SETTLE);
+
+    writer.send(&["XADD", "stream_key", "0-1", "a", "1"]);
+    writer.expect_reply("$3\r\n0-1\r\n");
+
+    let expected = concat!(
+        "*1\r\n*2\r\n$10\r\nstream_key\r\n",
+        "*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\na\r\n$1\r\n1\r\n",
+    );
+    first.expect_reply(expected);
+    second.expect_reply(expected);
+}
+
+#[test]
+fn a_blocking_read_wakes_on_whichever_stream_grows() {
+    let server = Server::start();
+    let mut blocked = server.connect();
+    let mut writer = server.connect();
+
+    blocked.send(&[
+        "XREAD",
+        "BLOCK",
+        "1000",
+        "STREAMS",
+        "first_stream",
+        "second_stream",
+        "0-0",
+        "0-0",
+    ]);
+    sleep(SETTLE);
+
+    writer.send(&["XADD", "second_stream", "0-1", "b", "2"]);
+    writer.expect_reply("$3\r\n0-1\r\n");
+
+    blocked.expect_reply(concat!(
+        "*1\r\n*2\r\n$13\r\nsecond_stream\r\n",
+        "*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\nb\r\n$1\r\n2\r\n",
+    ));
 }
 
 fn unix_milliseconds() -> u64 {
