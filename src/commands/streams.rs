@@ -8,7 +8,7 @@ pub fn run(command: &str, args: &[String], store: &Store) -> Option<Value> {
     let reply = match command {
         "XADD" => match args {
             // Fields come in pairs, and an entry needs at least one of them.
-            [key, id, fields @ ..] if !fields.is_empty() && fields.len() % 2 == 0 => {
+            [key, id, fields @ ..] if !fields.is_empty() && fields.len().is_multiple_of(2) => {
                 xadd(store, key, id, fields)
             }
             _ => wrong_arity("xadd"),
@@ -18,9 +18,9 @@ pub fn run(command: &str, args: &[String], store: &Store) -> Option<Value> {
             _ => wrong_arity("xrange"),
         },
         "XREAD" => match args {
-            [streams, key, id] if streams.eq_ignore_ascii_case("STREAMS") => xread(store, key, id),
-            [_, _, _] => Value::Error("ERR syntax error".into()),
-            _ => wrong_arity("xread"),
+            [streams, rest @ ..] if streams.eq_ignore_ascii_case("STREAMS") => xread(store, rest),
+            [] => wrong_arity("xread"),
+            _ => Value::Error("ERR syntax error".into()),
         },
         _ => return None,
     };
@@ -64,22 +64,40 @@ fn xrange(store: &Store, key: &str, start: &str, end: &str) -> Value {
     }
 }
 
-/// Reads entries recorded after `id`, which `XREAD` treats as exclusive.
-fn xread(store: &Store, key: &str, id: &str) -> Value {
-    let Some(after) = parse_id(id, 0) else {
-        return invalid_id();
-    };
-
-    match store.xread(key, after) {
-        // A stream with nothing new is left out of the reply entirely, which
-        // for a single stream leaves nothing to report.
-        Ok(entries) if entries.is_empty() => Value::NullArray,
-        Ok(entries) => Value::Array(vec![Value::Array(vec![
-            Value::BulkString(key.to_string()),
-            Value::Array(entries.into_iter().map(encode_entry).collect()),
-        ])]),
-        Err(WrongType) => wrong_type(),
+/// Reads the entries recorded after the given ids, which `XREAD` treats as
+/// exclusive. The keys come first and their ids follow, one for each.
+fn xread(store: &Store, arguments: &[String]) -> Value {
+    if arguments.is_empty() || !arguments.len().is_multiple_of(2) {
+        return Value::Error(
+            "ERR Unbalanced XREAD list of streams: for each stream key an ID or '$' must be specified."
+                .into(),
+        );
     }
+
+    let (keys, ids) = arguments.split_at(arguments.len() / 2);
+    let mut streams = Vec::new();
+
+    for (key, id) in keys.iter().zip(ids) {
+        let Some(after) = parse_id(id, 0) else {
+            return invalid_id();
+        };
+
+        match store.xread(key, after) {
+            // Streams with nothing new are left out of the reply entirely.
+            Ok(entries) if entries.is_empty() => {}
+            Ok(entries) => streams.push(Value::Array(vec![
+                Value::BulkString(key.clone()),
+                Value::Array(entries.into_iter().map(encode_entry).collect()),
+            ])),
+            Err(WrongType) => return wrong_type(),
+        }
+    }
+
+    if streams.is_empty() {
+        return Value::NullArray;
+    }
+
+    Value::Array(streams)
 }
 
 /// `XRANGE` also accepts the two ends of the stream in place of an id, so that

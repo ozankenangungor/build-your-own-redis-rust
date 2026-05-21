@@ -6,6 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const TOP_ITEM: &str =
     "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
 
+const UNBALANCED: &str = "-ERR Unbalanced XREAD list of streams: \
+     for each stream key an ID or '$' must be specified.\r\n";
+
 #[test]
 fn creates_a_stream_and_returns_the_entry_id() {
     let server = Server::start();
@@ -378,8 +381,75 @@ fn rejects_a_read_without_the_streams_keyword() {
     client.send(&["XREAD", "COUNT", "stream_key", "0-0"]);
     client.expect_reply("-ERR syntax error\r\n");
 
-    client.send(&["XREAD", "STREAMS", "stream_key"]);
+    client.send(&["XREAD"]);
     client.expect_reply("-ERR wrong number of arguments for 'xread' command\r\n");
+}
+
+#[test]
+fn rejects_a_read_whose_keys_and_ids_do_not_pair_up() {
+    let server = Server::start();
+    let mut client = three_entries(&server);
+
+    client.send(&["XREAD", "STREAMS", "stream_key"]);
+    client.expect_reply(UNBALANCED);
+
+    client.send(&["XREAD", "STREAMS", "stream_key", "other_key", "0-0"]);
+    client.expect_reply(UNBALANCED);
+
+    client.send(&["XREAD", "STREAMS"]);
+    client.expect_reply(UNBALANCED);
+}
+
+#[test]
+fn reads_several_streams_in_the_order_they_were_asked_for() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["XADD", "stream_key", "0-1", "temperature", "95"]);
+    client.expect_reply("$3\r\n0-1\r\n");
+    client.send(&["XADD", "other_stream_key", "0-2", "humidity", "97"]);
+    client.expect_reply("$3\r\n0-2\r\n");
+
+    client.send(&[
+        "XREAD",
+        "STREAMS",
+        "stream_key",
+        "other_stream_key",
+        "0-0",
+        "0-1",
+    ]);
+    client.expect_reply(concat!(
+        "*2\r\n",
+        "*2\r\n$10\r\nstream_key\r\n",
+        "*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$11\r\ntemperature\r\n$2\r\n95\r\n",
+        "*2\r\n$16\r\nother_stream_key\r\n",
+        "*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$8\r\nhumidity\r\n$2\r\n97\r\n",
+    ));
+}
+
+#[test]
+fn leaves_out_the_streams_with_nothing_new() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["XADD", "quiet_stream", "0-1", "a", "1"]);
+    client.expect_reply("$3\r\n0-1\r\n");
+    client.send(&["XADD", "busy_stream", "0-1", "b", "2"]);
+    client.expect_reply("$3\r\n0-1\r\n");
+
+    // Only the second stream has anything past the ids we ask from.
+    client.send(&[
+        "XREAD",
+        "STREAMS",
+        "quiet_stream",
+        "busy_stream",
+        "0-1",
+        "0-0",
+    ]);
+    client.expect_reply(concat!(
+        "*1\r\n*2\r\n$11\r\nbusy_stream\r\n",
+        "*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\nb\r\n$1\r\n2\r\n",
+    ));
 }
 
 #[test]
