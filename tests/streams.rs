@@ -503,6 +503,29 @@ fn a_blocking_read_waits_for_an_entry_to_arrive() {
 }
 
 #[test]
+fn a_zero_timeout_waits_for_as_long_as_it_takes() {
+    let server = Server::start();
+    let mut blocked = server.connect();
+    let mut writer = server.connect();
+
+    writer.send(&["XADD", "stream_key", "0-1", "temperature", "96"]);
+    writer.expect_reply("$3\r\n0-1\r\n");
+
+    blocked.send(&["XREAD", "BLOCK", "0", "STREAMS", "stream_key", "0-1"]);
+
+    // Well past any timeout a non-zero BLOCK would have used here.
+    sleep(Duration::from_millis(500));
+
+    writer.send(&["XADD", "stream_key", "0-2", "temperature", "95"]);
+    writer.expect_reply("$3\r\n0-2\r\n");
+
+    blocked.expect_reply(concat!(
+        "*1\r\n*2\r\n$10\r\nstream_key\r\n",
+        "*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$11\r\ntemperature\r\n$2\r\n95\r\n",
+    ));
+}
+
+#[test]
 fn a_blocking_read_gives_up_once_the_timeout_passes() {
     let server = Server::start();
     let mut client = three_entries(&server);

@@ -67,14 +67,19 @@ fn xrange(store: &Store, key: &str, start: &str, end: &str) -> Value {
 /// Reads the entries recorded after the given ids, which `XREAD` treats as
 /// exclusive, optionally waiting for new ones to arrive.
 async fn xread(store: &Store, args: &[String]) -> Value {
-    let (timeout, rest) = match args {
+    let (wait, rest) = match args {
         [block, milliseconds, rest @ ..] if block.eq_ignore_ascii_case("BLOCK") => {
-            let Ok(milliseconds) = milliseconds.parse() else {
+            let Ok(milliseconds) = milliseconds.parse::<u64>() else {
                 return Value::Error("ERR timeout is not an integer or out of range".into());
             };
-            (Some(Duration::from_millis(milliseconds)), rest)
+            let wait = match milliseconds {
+                // A timeout of zero asks to wait for as long as it takes.
+                0 => Wait::Forever,
+                milliseconds => Wait::Until(Instant::now() + Duration::from_millis(milliseconds)),
+            };
+            (wait, rest)
         }
-        _ => (None, args),
+        _ => (Wait::NotAtAll, args),
     };
 
     // The keys come first and their ids follow, one for each.
@@ -101,20 +106,31 @@ async fn xread(store: &Store, args: &[String]) -> Value {
         reads.push((key.clone(), after));
     }
 
-    match timeout {
-        None => match store.xread(&reads) {
+    match wait {
+        Wait::NotAtAll => match store.xread(&reads) {
             Ok(streams) => encode_streams(streams),
             Err(WrongType) => wrong_type(),
         },
-        Some(timeout) => wait_for_entries(store, &reads, timeout).await,
+        Wait::Forever => wait_for_entries(store, &reads, None).await,
+        Wait::Until(deadline) => wait_for_entries(store, &reads, Some(deadline)).await,
     }
+}
+
+/// How long an `XREAD` is willing to wait for entries to turn up.
+enum Wait {
+    /// Without `BLOCK`, the reply holds whatever is there right now.
+    NotAtAll,
+    Until(Instant),
+    Forever,
 }
 
 /// Reads again every time one of the streams grows, until something turns up or
 /// the deadline passes.
-async fn wait_for_entries(store: &Store, reads: &[(String, EntryId)], timeout: Duration) -> Value {
-    let deadline = Instant::now() + timeout;
-
+async fn wait_for_entries(
+    store: &Store,
+    reads: &[(String, EntryId)],
+    deadline: Option<Instant>,
+) -> Value {
     loop {
         let waker = match store.xread_or_watch(reads) {
             Ok(StreamRead::Ready(streams)) => return encode_streams(streams),
@@ -122,6 +138,13 @@ async fn wait_for_entries(store: &Store, reads: &[(String, EntryId)], timeout: D
             Err(WrongType) => return wrong_type(),
         };
 
+        let Some(deadline) = deadline else {
+            waker.notified().await;
+            continue;
+        };
+
+        // Measured afresh each time round, so the waiting adds up to the
+        // timeout the client asked for rather than restarting on every wake-up.
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return Value::NullArray;
         };
