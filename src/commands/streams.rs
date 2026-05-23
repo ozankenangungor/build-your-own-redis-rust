@@ -100,11 +100,23 @@ async fn xread(store: &Store, args: &[String]) -> Value {
     let mut reads = Vec::with_capacity(keys.len());
 
     for (key, id) in keys.iter().zip(ids) {
-        let Some(after) = parse_id(id, 0) else {
+        // `$` names whichever entry the stream ends at, which only the store
+        // can tell us, so it is left open here.
+        let after = if id == "$" {
+            None
+        } else if let Some(after) = parse_id(id, 0) {
+            Some(after)
+        } else {
             return invalid_id();
         };
+
         reads.push((key.clone(), after));
     }
+
+    let reads = match store.resolve_reads(&reads) {
+        Ok(reads) => reads,
+        Err(WrongType) => return wrong_type(),
+    };
 
     match wait {
         Wait::NotAtAll => match store.xread(&reads) {

@@ -195,6 +195,29 @@ impl Store {
         Ok(stream[first..last].to_vec())
     }
 
+    /// Replaces the ids left open with the one each stream ends at right now,
+    /// so that a read starting from `$` only sees what arrives from here on.
+    /// Resolving them together keeps an entry from slipping between two keys.
+    pub fn resolve_reads(
+        &self,
+        reads: &[(String, Option<EntryId>)],
+    ) -> Result<Vec<(String, EntryId)>, WrongType> {
+        let mut state = self.state();
+        let mut resolved = Vec::with_capacity(reads.len());
+
+        for (key, after) in reads {
+            let after = match after {
+                Some(after) => *after,
+                None => stream_at(&mut state.entries, key)?
+                    .and_then(|stream| stream.last())
+                    .map_or(EntryId::ZERO, |entry| entry.id),
+            };
+            resolved.push((key.clone(), after));
+        }
+
+        Ok(resolved)
+    }
+
     /// Returns the entries recorded after the given id in each stream. Unlike
     /// `XRANGE`, the entry carrying that id is not itself included, and streams
     /// with nothing new are left out.

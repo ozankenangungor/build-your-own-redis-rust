@@ -526,6 +526,55 @@ fn a_zero_timeout_waits_for_as_long_as_it_takes() {
 }
 
 #[test]
+fn a_dollar_reads_only_what_arrives_after_the_command() {
+    let server = Server::start();
+    let mut blocked = server.connect();
+    let mut writer = server.connect();
+
+    writer.send(&["XADD", "stream_key", "0-1", "temperature", "96"]);
+    writer.expect_reply("$3\r\n0-1\r\n");
+
+    blocked.send(&["XREAD", "BLOCK", "0", "STREAMS", "stream_key", "$"]);
+    sleep(SETTLE);
+
+    writer.send(&["XADD", "stream_key", "0-2", "temperature", "95"]);
+    writer.expect_reply("$3\r\n0-2\r\n");
+
+    // The entry that was already there is not part of the reply.
+    blocked.expect_reply(concat!(
+        "*1\r\n*2\r\n$10\r\nstream_key\r\n",
+        "*1\r\n*2\r\n$3\r\n0-2\r\n*2\r\n$11\r\ntemperature\r\n$2\r\n95\r\n",
+    ));
+}
+
+#[test]
+fn a_dollar_times_out_when_nothing_new_arrives() {
+    let server = Server::start();
+    let mut client = three_entries(&server);
+
+    client.send(&["XREAD", "BLOCK", "100", "STREAMS", "stream_key", "$"]);
+    client.expect_reply("*-1\r\n");
+}
+
+#[test]
+fn a_dollar_on_a_stream_that_does_not_exist_yet_waits_for_its_first_entry() {
+    let server = Server::start();
+    let mut blocked = server.connect();
+    let mut writer = server.connect();
+
+    blocked.send(&["XREAD", "BLOCK", "0", "STREAMS", "new_stream", "$"]);
+    sleep(SETTLE);
+
+    writer.send(&["XADD", "new_stream", "0-1", "a", "1"]);
+    writer.expect_reply("$3\r\n0-1\r\n");
+
+    blocked.expect_reply(concat!(
+        "*1\r\n*2\r\n$10\r\nnew_stream\r\n",
+        "*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\na\r\n$1\r\n1\r\n",
+    ));
+}
+
+#[test]
 fn a_blocking_read_gives_up_once_the_timeout_passes() {
     let server = Server::start();
     let mut client = three_entries(&server);
