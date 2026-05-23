@@ -1,5 +1,8 @@
 use anyhow::{Result, bail};
 
+/// The largest bulk string Redis accepts, and so the largest we do.
+const MAX_BULK_LENGTH: usize = 512 * 1024 * 1024;
+
 /// A value in the Redis serialization protocol.
 #[derive(Debug, PartialEq)]
 pub enum Value {
@@ -76,6 +79,11 @@ impl<'a> Parser<'a> {
 
     fn bulk_string(&mut self, payload: &[u8]) -> Result<Option<Value>> {
         let len: usize = text(payload)?.parse()?;
+        // Refusing absurd lengths keeps a bogus one from being taken at face
+        // value, and keeps the arithmetic below from overflowing.
+        if len > MAX_BULK_LENGTH {
+            bail!("invalid bulk length");
+        }
 
         let rest = &self.input[self.pos..];
         if rest.len() < len + 2 {
@@ -143,6 +151,13 @@ mod tests {
     #[test]
     fn waits_for_the_rest_of_a_split_command() {
         assert_eq!(parse(b"*2\r\n$4\r\nECHO\r\n$3\r\nh").unwrap(), None);
+    }
+
+    #[test]
+    fn refuses_a_bulk_length_it_could_never_hold() {
+        // Taken at face value, this length would overflow the arithmetic that
+        // looks for the end of the string.
+        assert!(parse(b"$18446744073709551615\r\n").is_err());
     }
 
     #[test]
