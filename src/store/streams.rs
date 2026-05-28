@@ -7,74 +7,13 @@ use tokio::sync::Notify;
 
 /// The identifier of a stream entry: a millisecond timestamp and a sequence
 /// number that orders entries recorded within the same millisecond.
+///
+/// The derived ordering compares the timestamps first and the sequence numbers
+/// only to break a tie, which is exactly how Redis orders entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EntryId {
     pub milliseconds: u64,
     pub sequence: u64,
-}
-
-/// One entry of a stream: an id and the field-value pairs recorded under it.
-#[derive(Debug, Clone)]
-pub struct StreamEntry {
-    pub id: EntryId,
-    pub fields: Vec<(String, String)>,
-}
-
-/// Fills in the parts of `requested` the client left to us, given the id of the
-/// stream's last entry.
-fn resolve(requested: RequestedId, top: Option<EntryId>) -> Result<EntryId, XaddError> {
-    let milliseconds = match requested {
-        RequestedId::Explicit(id) => return Ok(id),
-        RequestedId::AutoSequence(milliseconds) => milliseconds,
-        // Ids may never move backwards, even when the system clock does.
-        RequestedId::Auto => {
-            let now = now_milliseconds();
-            top.map_or(now, |top| now.max(top.milliseconds))
-        }
-    };
-
-    let sequence = match top {
-        // Carry on the run of entries recorded in this same millisecond.
-        Some(top) if top.milliseconds == milliseconds => {
-            top.sequence.checked_add(1).ok_or(XaddError::NotAboveTop)?
-        }
-        // `0-0` is not a valid id, so the first sequence at time zero is one.
-        _ if milliseconds == 0 => 1,
-        _ => 0,
-    };
-
-    Ok(EntryId {
-        milliseconds,
-        sequence,
-    })
-}
-
-/// The timestamp half of a generated id is the current Unix time, in the same
-/// milliseconds the ids themselves are counted in.
-fn now_milliseconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-/// A stream's key together with the entries read from it.
-pub type ReadStream = (String, Vec<StreamEntry>);
-
-/// The outcome of a blocking read: either something was there, or the caller
-/// has a waker that fires once one of the streams grows.
-pub enum StreamRead {
-    Ready(Vec<ReadStream>),
-    Waiting(Arc<Notify>),
-}
-
-/// Why an `XADD` was refused.
-pub enum XaddError {
-    WrongType,
-    /// Ids have to be strictly greater than `0-0`.
-    NotAboveZero,
-    /// Ids have to be strictly greater than the stream's last entry.
-    NotAboveTop,
 }
 
 impl EntryId {
@@ -128,6 +67,32 @@ impl FromStr for RequestedId {
             sequence: sequence.parse().map_err(|_| ())?,
         }))
     }
+}
+
+/// One entry of a stream: an id and the field-value pairs recorded under it.
+#[derive(Debug, Clone)]
+pub struct StreamEntry {
+    pub id: EntryId,
+    pub fields: Vec<(String, String)>,
+}
+
+/// A stream's key together with the entries read from it.
+pub type ReadStream = (String, Vec<StreamEntry>);
+
+/// The outcome of a blocking read: either something was there, or the caller
+/// has a waker that fires once one of the streams grows.
+pub enum StreamRead {
+    Ready(Vec<ReadStream>),
+    Waiting(Arc<Notify>),
+}
+
+/// Why an `XADD` was refused.
+pub enum XaddError {
+    WrongType,
+    /// Ids have to be strictly greater than `0-0`.
+    NotAboveZero,
+    /// Ids have to be strictly greater than the stream's last entry.
+    NotAboveTop,
 }
 
 impl Store {
@@ -223,7 +188,7 @@ impl Store {
     /// with nothing new are left out.
     pub fn xread(&self, reads: &[(String, EntryId)]) -> Result<Vec<ReadStream>, WrongType> {
         let mut state = self.state();
-        read(&mut state.entries, reads)
+        read_streams(&mut state.entries, reads)
     }
 
     /// The same read, except that coming back empty leaves a watcher on every
@@ -232,7 +197,7 @@ impl Store {
         let mut guard = self.state();
         let state = &mut *guard;
 
-        let streams = read(&mut state.entries, reads)?;
+        let streams = read_streams(&mut state.entries, reads)?;
         if !streams.is_empty() {
             return Ok(StreamRead::Ready(streams));
         }
@@ -241,11 +206,12 @@ impl Store {
         // right now from slipping past the client.
         let waker = Arc::new(Notify::new());
         for (key, _) in reads {
-            state
-                .watchers
-                .entry(key.clone())
-                .or_default()
-                .push(waker.clone());
+            let watchers = state.watchers.entry(key.clone()).or_default();
+            // A client waiting on several keys is only ever woken through one of
+            // them, so its wakers linger under the others. Once the client is
+            // gone, the map holds the only reference left.
+            watchers.retain(|waker| Arc::strong_count(waker) > 1);
+            watchers.push(waker.clone());
         }
 
         Ok(StreamRead::Waiting(waker))
@@ -263,7 +229,10 @@ impl State {
     }
 }
 
-fn read(entries: &mut Entries, reads: &[(String, EntryId)]) -> Result<Vec<ReadStream>, WrongType> {
+fn read_streams(
+    entries: &mut Entries,
+    reads: &[(String, EntryId)],
+) -> Result<Vec<ReadStream>, WrongType> {
     let mut streams = Vec::new();
 
     for (key, after) in reads {
@@ -296,4 +265,42 @@ fn stream_at<'a>(
         }) => Ok(Some(stream)),
         Some(_) => Err(WrongType),
     }
+}
+
+/// Fills in the parts of `requested` the client left to us, given the id of the
+/// stream's last entry.
+fn resolve(requested: RequestedId, top: Option<EntryId>) -> Result<EntryId, XaddError> {
+    let milliseconds = match requested {
+        RequestedId::Explicit(id) => return Ok(id),
+        RequestedId::AutoSequence(milliseconds) => milliseconds,
+        // Ids may never move backwards, even when the system clock does.
+        RequestedId::Auto => {
+            let now = now_milliseconds();
+            top.map_or(now, |top| now.max(top.milliseconds))
+        }
+    };
+
+    let sequence = match top {
+        // Carry on the run of entries recorded in this same millisecond.
+        Some(top) if top.milliseconds == milliseconds => {
+            top.sequence.checked_add(1).ok_or(XaddError::NotAboveTop)?
+        }
+        // `0-0` is not a valid id, so the first sequence at time zero is one.
+        _ if milliseconds == 0 => 1,
+        _ => 0,
+    };
+
+    Ok(EntryId {
+        milliseconds,
+        sequence,
+    })
+}
+
+/// The timestamp half of a generated id is the current Unix time, in the same
+/// milliseconds the ids themselves are counted in.
+fn now_milliseconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
