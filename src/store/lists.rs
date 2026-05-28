@@ -86,11 +86,13 @@ impl Store {
             Some(_) => return Err(WrongType),
             None => {
                 let (sender, receiver) = oneshot::channel();
-                state
-                    .waiters
-                    .entry(key.to_string())
-                    .or_default()
-                    .push_back(sender);
+
+                let queue = state.waiters.entry(key.to_string()).or_default();
+                // Clients that timed out or hung up leave their end behind, and
+                // nothing else clears them until the key is pushed to.
+                queue.retain(|waiter| !waiter.is_closed());
+                queue.push_back(sender);
+
                 return Ok(Blocked::Waiting(receiver));
             }
         }
