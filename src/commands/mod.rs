@@ -51,16 +51,16 @@ fn into_parts(command: Value) -> Option<Vec<String>> {
         .collect()
 }
 
-pub(crate) fn wrong_arity(command: &str) -> Value {
+fn wrong_arity(command: &str) -> Value {
     Value::Error(format!(
         "ERR wrong number of arguments for '{command}' command"
     ))
 }
 
-pub(crate) fn not_an_integer() -> Value {
+fn not_an_integer() -> Value {
     Value::Error("ERR value is not an integer or out of range".into())
 }
 
-pub(crate) fn wrong_type() -> Value {
+fn wrong_type() -> Value {
     Value::Error("WRONGTYPE Operation against a key holding the wrong kind of value".into())
 }

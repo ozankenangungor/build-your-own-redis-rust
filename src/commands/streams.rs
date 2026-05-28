@@ -64,56 +64,27 @@ fn xrange(store: &Store, key: &str, start: &str, end: &str) -> Value {
     }
 }
 
+/// How long an `XREAD` is willing to wait for entries to turn up.
+enum Wait {
+    /// Without `BLOCK`, the reply holds whatever is there right now.
+    NotAtAll,
+    Until(Instant),
+    Forever,
+}
+
+/// A key to read from, with the id to read after. `None` stands for `$`, which
+/// only the store can resolve.
+type PendingRead = (String, Option<EntryId>);
+
 /// Reads the entries recorded after the given ids, which `XREAD` treats as
 /// exclusive, optionally waiting for new ones to arrive.
 async fn xread(store: &Store, args: &[String]) -> Value {
-    let (wait, rest) = match args {
-        [block, milliseconds, rest @ ..] if block.eq_ignore_ascii_case("BLOCK") => {
-            let Ok(milliseconds) = milliseconds.parse::<u64>() else {
-                return Value::Error("ERR timeout is not an integer or out of range".into());
-            };
-            let wait = match milliseconds {
-                // A timeout of zero asks to wait for as long as it takes.
-                0 => Wait::Forever,
-                milliseconds => Wait::Until(Instant::now() + Duration::from_millis(milliseconds)),
-            };
-            (wait, rest)
-        }
-        _ => (Wait::NotAtAll, args),
+    let (wait, pending) = match parse_xread(args) {
+        Ok(parsed) => parsed,
+        Err(error) => return error,
     };
 
-    // The keys come first and their ids follow, one for each.
-    let arguments = match rest {
-        [streams, arguments @ ..] if streams.eq_ignore_ascii_case("STREAMS") => arguments,
-        [] => return wrong_arity("xread"),
-        _ => return Value::Error("ERR syntax error".into()),
-    };
-
-    if arguments.is_empty() || !arguments.len().is_multiple_of(2) {
-        return Value::Error(
-            "ERR Unbalanced XREAD list of streams: for each stream key an ID or '$' must be specified."
-                .into(),
-        );
-    }
-
-    let (keys, ids) = arguments.split_at(arguments.len() / 2);
-    let mut reads = Vec::with_capacity(keys.len());
-
-    for (key, id) in keys.iter().zip(ids) {
-        // `$` names whichever entry the stream ends at, which only the store
-        // can tell us, so it is left open here.
-        let after = if id == "$" {
-            None
-        } else if let Some(after) = parse_id(id, 0) {
-            Some(after)
-        } else {
-            return invalid_id();
-        };
-
-        reads.push((key.clone(), after));
-    }
-
-    let reads = match store.resolve_reads(&reads) {
+    let reads = match store.resolve_reads(&pending) {
         Ok(reads) => reads,
         Err(WrongType) => return wrong_type(),
     };
@@ -128,12 +99,54 @@ async fn xread(store: &Store, args: &[String]) -> Value {
     }
 }
 
-/// How long an `XREAD` is willing to wait for entries to turn up.
-enum Wait {
-    /// Without `BLOCK`, the reply holds whatever is there right now.
-    NotAtAll,
-    Until(Instant),
-    Forever,
+/// Reads the arguments of `[BLOCK <milliseconds>] STREAMS <key>... <id>...`.
+fn parse_xread(args: &[String]) -> Result<(Wait, Vec<PendingRead>), Value> {
+    let (wait, rest) = match args {
+        [block, milliseconds, rest @ ..] if block.eq_ignore_ascii_case("BLOCK") => {
+            let Ok(milliseconds) = milliseconds.parse::<u64>() else {
+                return Err(Value::Error(
+                    "ERR timeout is not an integer or out of range".into(),
+                ));
+            };
+            let wait = match milliseconds {
+                // A timeout of zero asks to wait for as long as it takes.
+                0 => Wait::Forever,
+                milliseconds => Wait::Until(Instant::now() + Duration::from_millis(milliseconds)),
+            };
+            (wait, rest)
+        }
+        _ => (Wait::NotAtAll, args),
+    };
+
+    let arguments = match rest {
+        [streams, arguments @ ..] if streams.eq_ignore_ascii_case("STREAMS") => arguments,
+        [] => return Err(wrong_arity("xread")),
+        _ => return Err(Value::Error("ERR syntax error".into())),
+    };
+
+    // The keys come first and their ids follow, one for each.
+    if arguments.is_empty() || !arguments.len().is_multiple_of(2) {
+        return Err(Value::Error(
+            "ERR Unbalanced XREAD list of streams: for each stream key an ID or '$' must be specified."
+                .into(),
+        ));
+    }
+
+    let (keys, ids) = arguments.split_at(arguments.len() / 2);
+    let mut pending = Vec::with_capacity(keys.len());
+
+    for (key, id) in keys.iter().zip(ids) {
+        // `$` names whichever entry the stream ends at, which only the store
+        // can tell us, so it is left open here.
+        let after = match id.as_str() {
+            "$" => None,
+            id => Some(parse_id(id, 0).ok_or_else(invalid_id)?),
+        };
+
+        pending.push((key.clone(), after));
+    }
+
+    Ok((wait, pending))
 }
 
 /// Reads again every time one of the streams grows, until something turns up or
