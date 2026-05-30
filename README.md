@@ -1,34 +1,57 @@
-[![progress-banner](https://backend.codecrafters.io/progress/redis/47372f32-aa1b-4593-8b0d-7a033fd66e68)](https://app.codecrafters.io/users/ozankenangungor?r=2qF)
+# Redis, written in Rust
 
-This is a starting point for Rust solutions to the
-["Build Your Own Redis" Challenge](https://codecrafters.io/challenges/redis).
+A Redis server built from scratch, following the
+["Build Your Own Redis"](https://codecrafters.io/challenges/redis) challenge.
+It speaks the real Redis wire protocol, so `redis-cli` and any Redis client
+library can talk to it.
 
-In this challenge, you'll build a toy Redis clone that's capable of handling
-basic commands like `PING`, `SET` and `GET`. Along the way we'll learn about
-event loops, the Redis protocol and more.
-
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
-
-# Passing the first stage
-
-The entry point for your Redis implementation is in `src/main.rs`. Study and
-uncomment the relevant code, then run the command below to execute the tests on
-our servers:
+## Running it
 
 ```sh
-codecrafters submit
+cargo run          # listens on 127.0.0.1:6379
+redis-cli PING     # from another terminal
 ```
 
-That's all!
+## What it supports
 
-# Stage 2 & beyond
+| Area | Commands |
+| --- | --- |
+| Connection | `PING`, `ECHO` |
+| Strings | `SET` (with `EX` / `PX` expiry), `GET` |
+| Lists | `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP` |
+| Streams | `XADD`, `XRANGE`, `XREAD` (with `BLOCK` and `$`) |
+| Keys | `TYPE` |
 
-Note: This section is for stages 2 and beyond.
+Beyond the individual commands, the server:
 
-1. Ensure you have `cargo (1.96)` installed locally
-1. Run `./your_program.sh` to run your Redis server, which is implemented in
-   `src/main.rs`. This command compiles your Rust project, so it might be slow
-   the first time you run it. Subsequent runs will be fast.
-1. Run `codecrafters submit` to submit your solution to CodeCrafters. Test
-   output will be streamed to your terminal.
+- serves any number of clients at once, one task per connection;
+- handles several commands arriving in a single packet, and commands split
+  across packets;
+- expires keys lazily, the way Redis does;
+- blocks clients on `BLPOP` and `XREAD BLOCK`, waking the one that has waited
+  longest for a list element and every waiting reader for a stream entry;
+- replies with the same error messages as Redis, including `WRONGTYPE` and the
+  arity and syntax errors.
+
+## Layout
+
+```
+src/
+  main.rs         binds the port and accepts connections
+  connection.rs   reads commands from one client and writes the replies
+  resp.rs         the Redis serialization protocol: parsing and encoding
+  commands/       one module per command family, plus the dispatcher
+  store/          the shared key-value state, split by data type
+tests/            integration tests that drive a real server over TCP
+```
+
+## Tests
+
+The test suite starts the compiled binary and talks to it over a socket, so it
+exercises the same path a real client takes.
+
+```sh
+cargo test
+cargo clippy --all-targets
+cargo fmt --check
+```
