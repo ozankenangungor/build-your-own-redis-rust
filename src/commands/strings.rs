@@ -1,6 +1,6 @@
 use super::{not_an_integer, text, wrong_arity, wrong_type};
 use crate::resp::Value;
-use crate::store::{Store, WrongType};
+use crate::store::{IncrementError, Store, WrongType};
 use bytes::Bytes;
 use std::time::Duration;
 
@@ -23,6 +23,15 @@ pub fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
                 Err(WrongType) => wrong_type(),
             },
             _ => wrong_arity("get"),
+        },
+        "INCR" => match args {
+            [key] => match store.increment(key) {
+                Ok(value) => Value::Integer(value),
+                Err(IncrementError::NotAnInteger) => not_an_integer(),
+                Err(IncrementError::Overflow) => overflow(),
+                Err(IncrementError::WrongType) => wrong_type(),
+            },
+            _ => wrong_arity("incr"),
         },
         _ => return None,
     };
@@ -63,4 +72,8 @@ fn parse_expiry(options: &[Bytes]) -> Result<Option<Duration>, Value> {
 
 fn syntax_error() -> Value {
     Value::Error("ERR syntax error".into())
+}
+
+fn overflow() -> Value {
+    Value::Error("ERR increment or decrement would overflow".into())
 }

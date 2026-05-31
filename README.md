@@ -17,7 +17,7 @@ redis-cli PING     # from another terminal
 | Area | Commands |
 | --- | --- |
 | Connection | `PING`, `ECHO` |
-| Strings | `SET` (with `EX` / `PX` expiry), `GET` |
+| Strings | `SET` (with `EX` / `PX` expiry), `GET`, `INCR` |
 | Lists | `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP` |
 | Streams | `XADD`, `XRANGE`, `XREAD` (with `BLOCK` and `$`) |
 | Keys | `TYPE` |

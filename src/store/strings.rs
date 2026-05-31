@@ -24,4 +24,35 @@ impl Store {
             Some(_) => Err(WrongType),
         }
     }
+
+    /// Adds one to the number held at `key`, storing and returning the result.
+    pub fn increment(&self, key: &Bytes) -> Result<i64, IncrementError> {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        let Some(entry) = state.entries.get_mut(key) else {
+            return Err(IncrementError::NotAnInteger);
+        };
+        let Data::String(value) = &mut entry.data else {
+            return Err(IncrementError::WrongType);
+        };
+
+        let number = str::from_utf8(value)
+            .ok()
+            .and_then(|number| number.parse::<i64>().ok())
+            .ok_or(IncrementError::NotAnInteger)?;
+        let incremented = number.checked_add(1).ok_or(IncrementError::Overflow)?;
+
+        // Writing through the entry leaves whatever expiry it carries in place,
+        // since counting up is not the same as setting the key anew.
+        *value = Bytes::from(incremented.to_string());
+        Ok(incremented)
+    }
+}
+
+/// Why an increment could not go through.
+pub enum IncrementError {
+    NotAnInteger,
+    Overflow,
+    WrongType,
 }

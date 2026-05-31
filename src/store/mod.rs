@@ -4,6 +4,7 @@ mod strings;
 
 pub use lists::{Blocked, Side};
 pub use streams::{EntryId, ReadStream, RequestedId, StreamEntry, StreamRead, XaddError};
+pub use strings::IncrementError;
 
 use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
