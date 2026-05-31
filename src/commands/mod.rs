@@ -5,6 +5,7 @@ mod strings;
 
 use crate::resp::Value;
 use crate::store::Store;
+use bytes::Bytes;
 
 /// Runs one client command and produces the reply to send back.
 ///
@@ -18,7 +19,10 @@ pub async fn run(command: Value, store: &Store) -> Value {
         return Value::Error("ERR empty command".into());
     };
 
-    let uppercased = name.to_uppercase();
+    // Command names are ASCII, so anything else is unknown by definition.
+    let Some(uppercased) = text(name).map(str::to_uppercase) else {
+        return unknown_command(name);
+    };
 
     if let Some(reply) = strings::run(&uppercased, args, store) {
         return reply;
@@ -33,11 +37,11 @@ pub async fn run(command: Value, store: &Store) -> Value {
         return reply;
     }
 
-    Value::Error(format!("ERR unknown command '{name}'"))
+    unknown_command(name)
 }
 
 /// Clients send commands as an array of bulk strings; anything else is invalid.
-fn into_parts(command: Value) -> Option<Vec<String>> {
+fn into_parts(command: Value) -> Option<Vec<Bytes>> {
     let Value::Array(parts) = command else {
         return None;
     };
@@ -45,10 +49,23 @@ fn into_parts(command: Value) -> Option<Vec<String>> {
     parts
         .into_iter()
         .map(|part| match part {
-            Value::BulkString(text) => Some(text),
+            Value::BulkString(bytes) => Some(bytes),
             _ => None,
         })
         .collect()
+}
+
+/// Reads an argument as text. Command names, option keywords and numbers are
+/// ASCII by definition, unlike the keys and values they sit next to.
+fn text(argument: &[u8]) -> Option<&str> {
+    str::from_utf8(argument).ok()
+}
+
+fn unknown_command(name: &[u8]) -> Value {
+    Value::Error(format!(
+        "ERR unknown command '{}'",
+        String::from_utf8_lossy(name)
+    ))
 }
 
 fn wrong_arity(command: &str) -> Value {

@@ -28,12 +28,12 @@ pub async fn serve(mut stream: TcpStream, store: Store) -> Result<()> {
                 // tell where the next command starts, so say so and hang up.
                 Err(error) => {
                     let reply = Value::Error(format!("ERR Protocol error: {error}"));
-                    stream.write_all(reply.encode().as_bytes()).await?;
+                    stream.write_all(&reply.encode()).await?;
                     return Ok(());
                 }
             };
 
-            stream.write_all(reply.encode().as_bytes()).await?;
+            stream.write_all(&reply.encode()).await?;
         }
     }
 }

@@ -69,11 +69,19 @@ pub struct Client(TcpStream);
 impl Client {
     /// Sends `args` encoded as a RESP array, the way a real Redis client does.
     pub fn send(&mut self, args: &[&str]) {
-        let mut request = format!("*{}\r\n", args.len());
+        let args: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
+        self.send_bytes(&args);
+    }
+
+    /// The same, for arguments that are not text.
+    pub fn send_bytes(&mut self, args: &[&[u8]]) {
+        let mut request = format!("*{}\r\n", args.len()).into_bytes();
         for arg in args {
-            request.push_str(&format!("${}\r\n{arg}\r\n", arg.len()));
+            request.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+            request.extend_from_slice(arg);
+            request.extend_from_slice(b"\r\n");
         }
-        self.send_raw(request.as_bytes());
+        self.send_raw(&request);
     }
 
     pub fn send_raw(&mut self, bytes: &[u8]) {
@@ -87,6 +95,13 @@ impl Client {
         let mut buf = vec![0u8; expected.len()];
         self.0.read_exact(&mut buf).expect("failed to read reply");
         assert_eq!(String::from_utf8_lossy(&buf), expected);
+    }
+
+    /// The same, for replies that are not text.
+    pub fn expect_bytes(&mut self, expected: &[u8]) {
+        let mut buf = vec![0u8; expected.len()];
+        self.0.read_exact(&mut buf).expect("failed to read reply");
+        assert_eq!(buf, expected);
     }
 
     /// Reads a bulk string reply and returns its contents, for the replies whose

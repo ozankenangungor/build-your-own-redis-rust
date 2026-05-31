@@ -134,6 +134,18 @@ fn returns_an_empty_array_when_nothing_is_in_range() {
 }
 
 #[test]
+fn holds_stream_fields_that_are_not_text() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send_bytes(&[b"XADD", b"stream_key", b"0-1", b"\xff", b"\x00\x01"]);
+    client.expect_reply("$3\r\n0-1\r\n");
+
+    client.send_bytes(&[b"XRANGE", b"stream_key", b"-", b"+"]);
+    client.expect_bytes(b"*1\r\n*2\r\n$3\r\n0-1\r\n*2\r\n$1\r\n\xff\r\n$2\r\n\x00\x01\r\n");
+}
+
+#[test]
 fn rejects_a_range_with_a_malformed_bound() {
     let server = Server::start();
     let mut client = three_entries(&server);

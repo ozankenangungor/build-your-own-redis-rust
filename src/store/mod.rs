@@ -5,6 +5,7 @@ mod strings;
 pub use lists::{Blocked, Side};
 pub use streams::{EntryId, ReadStream, RequestedId, StreamEntry, StreamRead, XaddError};
 
+use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -33,18 +34,18 @@ struct State {
     entries: Entries,
     /// Clients blocked on a key, in the order they started waiting. Only the
     /// list commands use these, but they have to share the lock with `entries`.
-    waiters: HashMap<String, VecDeque<oneshot::Sender<String>>>,
+    waiters: HashMap<Bytes, VecDeque<oneshot::Sender<Bytes>>>,
     /// Clients waiting for a stream to grow. Every one of them is woken, since
     /// reading an entry does not take it away from the others.
-    watchers: HashMap<String, Vec<Arc<Notify>>>,
+    watchers: HashMap<Bytes, Vec<Arc<Notify>>>,
 }
 
-type Entries = HashMap<String, Entry>;
+type Entries = HashMap<Bytes, Entry>;
 
 impl Store {
     /// Reports what `key` holds. This is the one lookup that never fails on a
     /// type mismatch, since telling them apart is the whole point.
-    pub fn kind(&self, key: &str) -> Kind {
+    pub fn kind(&self, key: &Bytes) -> Kind {
         let mut state = self.state();
         drop_if_expired(&mut state.entries, key);
 
@@ -80,8 +81,8 @@ struct Entry {
 }
 
 enum Data {
-    String(String),
-    List(Vec<String>),
+    String(Bytes),
+    List(Vec<Bytes>),
     Stream(Vec<streams::StreamEntry>),
 }
 
@@ -100,7 +101,7 @@ impl Entry {
 }
 
 /// Redis expires keys lazily, so drop this one now that we are looking at it.
-fn drop_if_expired(entries: &mut Entries, key: &str) {
+fn drop_if_expired(entries: &mut Entries, key: &Bytes) {
     if entries.get(key).is_some_and(Entry::has_expired) {
         entries.remove(key);
     }

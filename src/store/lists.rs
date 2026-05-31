@@ -1,4 +1,5 @@
 use super::{Data, Entries, Entry, State, Store, WrongType, drop_if_expired};
+use bytes::Bytes;
 use tokio::sync::oneshot;
 
 /// The end of a list a command works from.
@@ -10,14 +11,14 @@ pub enum Side {
 /// The outcome of a blocking pop: either an element was there, or the caller
 /// has been queued and will be handed one as soon as it arrives.
 pub enum Blocked {
-    Ready(String),
-    Waiting(oneshot::Receiver<String>),
+    Ready(Bytes),
+    Waiting(oneshot::Receiver<Bytes>),
 }
 
 impl Store {
     /// Adds to the list at `key`, creating it first if it does not exist, and
     /// returns the list's new length.
-    pub fn push(&self, key: &str, elements: &[String], side: Side) -> Result<usize, WrongType> {
+    pub fn push(&self, key: &Bytes, elements: &[Bytes], side: Side) -> Result<usize, WrongType> {
         let mut guard = self.state();
         // Borrow the state once so `entries` and `waiters` count as separate
         // fields rather than two borrows of the guard.
@@ -26,7 +27,7 @@ impl Store {
 
         let entry = state
             .entries
-            .entry(key.to_string())
+            .entry(key.clone())
             .or_insert_with(|| Entry::new(Data::List(Vec::new())));
 
         let Data::List(list) = &mut entry.data else {
@@ -52,7 +53,7 @@ impl Store {
 
     /// Removes and returns up to `count` elements from the front of the list at
     /// `key`. Redis drops a key once its list runs empty, so we do the same.
-    pub fn lpop(&self, key: &str, count: usize) -> Result<Vec<String>, WrongType> {
+    pub fn lpop(&self, key: &Bytes, count: usize) -> Result<Vec<Bytes>, WrongType> {
         let mut state = self.state();
         drop_if_expired(&mut state.entries, key);
 
@@ -73,7 +74,7 @@ impl Store {
 
     /// Takes the first element of the list at `key`, or puts the caller at the
     /// back of the queue of clients waiting for one.
-    pub fn blpop(&self, key: &str) -> Result<Blocked, WrongType> {
+    pub fn blpop(&self, key: &Bytes) -> Result<Blocked, WrongType> {
         let mut guard = self.state();
         let state = &mut *guard;
         drop_if_expired(&mut state.entries, key);
@@ -87,7 +88,7 @@ impl Store {
             None => {
                 let (sender, receiver) = oneshot::channel();
 
-                let queue = state.waiters.entry(key.to_string()).or_default();
+                let queue = state.waiters.entry(key.clone()).or_default();
                 // Clients that timed out or hung up leave their end behind, and
                 // nothing else clears them until the key is pushed to.
                 queue.retain(|waiter| !waiter.is_closed());
@@ -104,7 +105,7 @@ impl Store {
     /// Returns the elements of the list at `key` between `start` and `stop`,
     /// both inclusive. A window that falls outside the list is not an error: it
     /// is clamped, and yields fewer elements or none at all.
-    pub fn lrange(&self, key: &str, start: i64, stop: i64) -> Result<Vec<String>, WrongType> {
+    pub fn lrange(&self, key: &Bytes, start: i64, stop: i64) -> Result<Vec<Bytes>, WrongType> {
         let mut state = self.state();
         let Some(list) = list_at(&mut state.entries, key)? else {
             return Ok(Vec::new());
@@ -122,7 +123,7 @@ impl Store {
     }
 
     /// Returns the length of the list at `key`, or zero if it does not exist.
-    pub fn llen(&self, key: &str) -> Result<usize, WrongType> {
+    pub fn llen(&self, key: &Bytes) -> Result<usize, WrongType> {
         let mut state = self.state();
         Ok(list_at(&mut state.entries, key)?.map_or(0, Vec::len))
     }
@@ -131,7 +132,7 @@ impl Store {
 impl State {
     /// Hands the elements at `key` to the clients blocked on it, serving the
     /// one that has been waiting the longest first.
-    fn wake_waiters(&mut self, key: &str) {
+    fn wake_waiters(&mut self, key: &Bytes) {
         let Some(queue) = self.waiters.get_mut(key) else {
             return;
         };
@@ -157,7 +158,7 @@ impl State {
 
 /// Looks up the list stored at `key`. `Ok(None)` means the key is absent, which
 /// list commands treat as an empty list rather than an error.
-fn list_at<'a>(entries: &'a mut Entries, key: &str) -> Result<Option<&'a Vec<String>>, WrongType> {
+fn list_at<'a>(entries: &'a mut Entries, key: &Bytes) -> Result<Option<&'a Vec<Bytes>>, WrongType> {
     drop_if_expired(entries, key);
 
     match entries.get(key) {
@@ -170,7 +171,7 @@ fn list_at<'a>(entries: &'a mut Entries, key: &str) -> Result<Option<&'a Vec<Str
     }
 }
 
-fn pop_first(entries: &mut Entries, key: &str) -> Option<String> {
+fn pop_first(entries: &mut Entries, key: &Bytes) -> Option<Bytes> {
     let Some(Entry {
         data: Data::List(list),
         ..
@@ -187,9 +188,9 @@ fn pop_first(entries: &mut Entries, key: &str) -> Option<String> {
     Some(element)
 }
 
-fn push_first(entries: &mut Entries, key: &str, element: String) {
+fn push_first(entries: &mut Entries, key: &Bytes, element: Bytes) {
     let entry = entries
-        .entry(key.to_string())
+        .entry(key.clone())
         .or_insert_with(|| Entry::new(Data::List(Vec::new())));
 
     if let Data::List(list) = &mut entry.data {

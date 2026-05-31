@@ -77,6 +77,18 @@ fn prepends_onto_a_list_built_from_the_right() {
 }
 
 #[test]
+fn holds_list_elements_that_are_not_text() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send_bytes(&[b"RPUSH", b"list_key", b"\x00\x01", b"\xff"]);
+    client.expect_reply(":2\r\n");
+
+    client.send_bytes(&[b"LRANGE", b"list_key", b"0", b"-1"]);
+    client.expect_bytes(b"*2\r\n$2\r\n\x00\x01\r\n$1\r\n\xff\r\n");
+}
+
+#[test]
 fn rejects_a_push_without_elements() {
     let server = Server::start();
     let mut client = server.connect();

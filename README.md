@@ -24,6 +24,7 @@ redis-cli PING     # from another terminal
 
 Beyond the individual commands, the server:
 
+- is binary safe, so keys and values may hold any bytes at all, not just text;
 - serves any number of clients at once, one task per connection;
 - handles several commands arriving in a single packet, and commands split
   across packets;

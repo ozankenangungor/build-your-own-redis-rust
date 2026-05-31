@@ -1,4 +1,5 @@
 use super::{Data, Entries, Entry, State, Store, WrongType, drop_if_expired};
+use bytes::Bytes;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -73,11 +74,11 @@ impl FromStr for RequestedId {
 #[derive(Debug, Clone)]
 pub struct StreamEntry {
     pub id: EntryId,
-    pub fields: Vec<(String, String)>,
+    pub fields: Vec<(Bytes, Bytes)>,
 }
 
 /// A stream's key together with the entries read from it.
-pub type ReadStream = (String, Vec<StreamEntry>);
+pub type ReadStream = (Bytes, Vec<StreamEntry>);
 
 /// The outcome of a blocking read: either something was there, or the caller
 /// has a waker that fires once one of the streams grows.
@@ -103,9 +104,9 @@ impl Store {
     /// stream a log rather than a bag of entries.
     pub fn xadd(
         &self,
-        key: &str,
+        key: &Bytes,
         requested: RequestedId,
-        fields: Vec<(String, String)>,
+        fields: Vec<(Bytes, Bytes)>,
     ) -> Result<EntryId, XaddError> {
         // Redis rejects `0-0` before it ever looks at the key.
         if let RequestedId::Explicit(id) = requested
@@ -119,7 +120,7 @@ impl Store {
 
         let entry = state
             .entries
-            .entry(key.to_string())
+            .entry(key.clone())
             .or_insert_with(|| Entry::new(Data::Stream(Vec::new())));
 
         let Data::Stream(stream) = &mut entry.data else {
@@ -143,7 +144,7 @@ impl Store {
     /// `start` and `end`, both included.
     pub fn xrange(
         &self,
-        key: &str,
+        key: &Bytes,
         start: EntryId,
         end: EntryId,
     ) -> Result<Vec<StreamEntry>, WrongType> {
@@ -165,8 +166,8 @@ impl Store {
     /// Resolving them together keeps an entry from slipping between two keys.
     pub fn resolve_reads(
         &self,
-        reads: &[(String, Option<EntryId>)],
-    ) -> Result<Vec<(String, EntryId)>, WrongType> {
+        reads: &[(Bytes, Option<EntryId>)],
+    ) -> Result<Vec<(Bytes, EntryId)>, WrongType> {
         let mut state = self.state();
         let mut resolved = Vec::with_capacity(reads.len());
 
@@ -186,14 +187,14 @@ impl Store {
     /// Returns the entries recorded after the given id in each stream. Unlike
     /// `XRANGE`, the entry carrying that id is not itself included, and streams
     /// with nothing new are left out.
-    pub fn xread(&self, reads: &[(String, EntryId)]) -> Result<Vec<ReadStream>, WrongType> {
+    pub fn xread(&self, reads: &[(Bytes, EntryId)]) -> Result<Vec<ReadStream>, WrongType> {
         let mut state = self.state();
         read_streams(&mut state.entries, reads)
     }
 
     /// The same read, except that coming back empty leaves a watcher on every
     /// key, which fires as soon as any of them grows.
-    pub fn xread_or_watch(&self, reads: &[(String, EntryId)]) -> Result<StreamRead, WrongType> {
+    pub fn xread_or_watch(&self, reads: &[(Bytes, EntryId)]) -> Result<StreamRead, WrongType> {
         let mut guard = self.state();
         let state = &mut *guard;
 
@@ -220,7 +221,7 @@ impl Store {
 
 impl State {
     /// Tells every client waiting on `key` that the stream has grown.
-    fn wake_watchers(&mut self, key: &str) {
+    fn wake_watchers(&mut self, key: &Bytes) {
         for waker in self.watchers.remove(key).unwrap_or_default() {
             // Each waker belongs to a single client, so a permit is kept for
             // one that has not started waiting yet.
@@ -231,7 +232,7 @@ impl State {
 
 fn read_streams(
     entries: &mut Entries,
-    reads: &[(String, EntryId)],
+    reads: &[(Bytes, EntryId)],
 ) -> Result<Vec<ReadStream>, WrongType> {
     let mut streams = Vec::new();
 
@@ -253,7 +254,7 @@ fn read_streams(
 /// which the query commands treat as an empty stream rather than an error.
 fn stream_at<'a>(
     entries: &'a mut Entries,
-    key: &str,
+    key: &Bytes,
 ) -> Result<Option<&'a Vec<StreamEntry>>, WrongType> {
     drop_if_expired(entries, key);
 

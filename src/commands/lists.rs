@@ -1,13 +1,14 @@
-use super::{not_an_integer, wrong_arity, wrong_type};
+use super::{not_an_integer, text, wrong_arity, wrong_type};
 use crate::resp::Value;
 use crate::store::{Blocked, Side, Store, WrongType};
+use bytes::Bytes;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::time;
 
 /// Handles the commands that work on lists. `None` means the command belongs to
 /// another module.
-pub async fn run(command: &str, args: &[String], store: &Store) -> Option<Value> {
+pub async fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
     let reply = match command {
         "RPUSH" => match args {
             [key, elements @ ..] if !elements.is_empty() => push(store, key, elements, Side::Right),
@@ -43,7 +44,7 @@ pub async fn run(command: &str, args: &[String], store: &Store) -> Option<Value>
     Some(reply)
 }
 
-fn push(store: &Store, key: &str, elements: &[String], side: Side) -> Value {
+fn push(store: &Store, key: &Bytes, elements: &[Bytes], side: Side) -> Value {
     match store.push(key, elements, side) {
         Ok(length) => Value::Integer(length as i64),
         Err(WrongType) => wrong_type(),
@@ -52,7 +53,7 @@ fn push(store: &Store, key: &str, elements: &[String], side: Side) -> Value {
 
 /// Without a count `LPOP` replies with a single element, with one it replies
 /// with an array — even when that array holds a single element, or none.
-fn lpop(store: &Store, key: &str, count: Option<&str>) -> Value {
+fn lpop(store: &Store, key: &Bytes, count: Option<&Bytes>) -> Value {
     let Some(count) = count else {
         return match store.lpop(key, 1) {
             Ok(removed) => removed
@@ -63,7 +64,7 @@ fn lpop(store: &Store, key: &str, count: Option<&str>) -> Value {
         };
     };
 
-    let Ok(count) = count.parse::<i64>() else {
+    let Some(count) = text(count).and_then(|count| count.parse::<i64>().ok()) else {
         return not_an_integer();
     };
     let Ok(count) = usize::try_from(count) else {
@@ -79,7 +80,7 @@ fn lpop(store: &Store, key: &str, count: Option<&str>) -> Value {
 /// Pops the first element of `key`, waiting for one to arrive if the list is
 /// empty. The reply names the list, since a later stage lets a client block on
 /// several at once.
-async fn blpop(store: &Store, key: &str, timeout: &str) -> Value {
+async fn blpop(store: &Store, key: &Bytes, timeout: &Bytes) -> Value {
     let timeout = match parse_timeout(timeout) {
         Ok(timeout) => timeout,
         Err(error) => return error,
@@ -93,7 +94,7 @@ async fn blpop(store: &Store, key: &str, timeout: &str) -> Value {
 
     match element {
         Some(element) => Value::Array(vec![
-            Value::BulkString(key.to_string()),
+            Value::BulkString(key.clone()),
             Value::BulkString(element),
         ]),
         None => Value::NullArray,
@@ -102,8 +103,8 @@ async fn blpop(store: &Store, key: &str, timeout: &str) -> Value {
 
 /// Reads a blocking command's timeout, given in seconds. `None` stands for the
 /// timeout of zero, which asks to wait indefinitely.
-fn parse_timeout(timeout: &str) -> Result<Option<Duration>, Value> {
-    let Ok(seconds) = timeout.parse::<f64>() else {
+fn parse_timeout(timeout: &Bytes) -> Result<Option<Duration>, Value> {
+    let Some(seconds) = text(timeout).and_then(|timeout| timeout.parse::<f64>().ok()) else {
         return Err(bad_timeout());
     };
     if seconds < 0.0 {
@@ -122,17 +123,17 @@ fn parse_timeout(timeout: &str) -> Result<Option<Duration>, Value> {
 /// Dropping the receiver on a timeout also marks the queued waiter as gone, so
 /// the store hands the element to the next client instead of losing it.
 async fn wait_for_element(
-    receiver: oneshot::Receiver<String>,
+    receiver: oneshot::Receiver<Bytes>,
     timeout: Option<Duration>,
-) -> Option<String> {
+) -> Option<Bytes> {
     match timeout {
         None => receiver.await.ok(),
         Some(timeout) => time::timeout(timeout, receiver).await.ok()?.ok(),
     }
 }
 
-fn lrange(store: &Store, key: &str, start: &str, stop: &str) -> Value {
-    let (Ok(start), Ok(stop)) = (start.parse(), stop.parse()) else {
+fn lrange(store: &Store, key: &Bytes, start: &Bytes, stop: &Bytes) -> Value {
+    let (Some(start), Some(stop)) = (parse_index(start), parse_index(stop)) else {
         return not_an_integer();
     };
 
@@ -140,6 +141,10 @@ fn lrange(store: &Store, key: &str, start: &str, stop: &str) -> Value {
         Ok(elements) => Value::Array(elements.into_iter().map(Value::BulkString).collect()),
         Err(WrongType) => wrong_type(),
     }
+}
+
+fn parse_index(index: &Bytes) -> Option<i64> {
+    text(index)?.parse().ok()
 }
 
 fn bad_timeout() -> Value {

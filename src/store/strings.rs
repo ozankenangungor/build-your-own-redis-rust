@@ -1,8 +1,9 @@
 use super::{Data, Entry, Store, WrongType, drop_if_expired};
+use bytes::Bytes;
 use std::time::{Duration, Instant};
 
 impl Store {
-    pub fn set(&self, key: String, value: String, expires_in: Option<Duration>) {
+    pub fn set(&self, key: Bytes, value: Bytes, expires_in: Option<Duration>) {
         let entry = Entry {
             data: Data::String(value),
             expires_at: expires_in.map(|delay| Instant::now() + delay),
@@ -10,7 +11,7 @@ impl Store {
         self.state().entries.insert(key, entry);
     }
 
-    pub fn get(&self, key: &str) -> Result<Option<String>, WrongType> {
+    pub fn get(&self, key: &Bytes) -> Result<Option<Bytes>, WrongType> {
         let mut state = self.state();
         drop_if_expired(&mut state.entries, key);
 

@@ -1,14 +1,15 @@
-use super::{wrong_arity, wrong_type};
+use super::{text, wrong_arity, wrong_type};
 use crate::resp::Value;
 use crate::store::{
     EntryId, ReadStream, RequestedId, Store, StreamEntry, StreamRead, WrongType, XaddError,
 };
+use bytes::Bytes;
 use std::time::{Duration, Instant};
 use tokio::time;
 
 /// Handles the commands that work on streams. `None` means the command belongs
 /// to another module.
-pub async fn run(command: &str, args: &[String], store: &Store) -> Option<Value> {
+pub async fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
     let reply = match command {
         "XADD" => match args {
             // Fields come in pairs, and an entry needs at least one of them.
@@ -28,8 +29,8 @@ pub async fn run(command: &str, args: &[String], store: &Store) -> Option<Value>
     Some(reply)
 }
 
-fn xadd(store: &Store, key: &str, id: &str, fields: &[String]) -> Value {
-    let Ok(id) = id.parse::<RequestedId>() else {
+fn xadd(store: &Store, key: &Bytes, id: &Bytes, fields: &[Bytes]) -> Value {
+    let Some(id) = text(id).and_then(|id| id.parse::<RequestedId>().ok()) else {
         return invalid_id();
     };
 
@@ -39,7 +40,7 @@ fn xadd(store: &Store, key: &str, id: &str, fields: &[String]) -> Value {
         .collect();
 
     match store.xadd(key, id, fields) {
-        Ok(id) => Value::BulkString(id.to_string()),
+        Ok(id) => Value::BulkString(id.to_string().into()),
         Err(XaddError::WrongType) => wrong_type(),
         Err(XaddError::NotAboveZero) => {
             Value::Error("ERR The ID specified in XADD must be greater than 0-0".into())
@@ -51,7 +52,7 @@ fn xadd(store: &Store, key: &str, id: &str, fields: &[String]) -> Value {
     }
 }
 
-fn xrange(store: &Store, key: &str, start: &str, end: &str) -> Value {
+fn xrange(store: &Store, key: &Bytes, start: &Bytes, end: &Bytes) -> Value {
     // A bound without a sequence number covers the whole millisecond, so the
     // start falls back to the lowest sequence and the end to the highest.
     let (Some(start), Some(end)) = (parse_bound(start, 0), parse_bound(end, u64::MAX)) else {
@@ -74,11 +75,11 @@ enum Wait {
 
 /// A key to read from, with the id to read after. `None` stands for `$`, which
 /// only the store can resolve.
-type PendingRead = (String, Option<EntryId>);
+type PendingRead = (Bytes, Option<EntryId>);
 
 /// Reads the entries recorded after the given ids, which `XREAD` treats as
 /// exclusive, optionally waiting for new ones to arrive.
-async fn xread(store: &Store, args: &[String]) -> Value {
+async fn xread(store: &Store, args: &[Bytes]) -> Value {
     let (wait, pending) = match parse_xread(args) {
         Ok(parsed) => parsed,
         Err(error) => return error,
@@ -100,10 +101,12 @@ async fn xread(store: &Store, args: &[String]) -> Value {
 }
 
 /// Reads the arguments of `[BLOCK <milliseconds>] STREAMS <key>... <id>...`.
-fn parse_xread(args: &[String]) -> Result<(Wait, Vec<PendingRead>), Value> {
+fn parse_xread(args: &[Bytes]) -> Result<(Wait, Vec<PendingRead>), Value> {
     let (wait, rest) = match args {
-        [block, milliseconds, rest @ ..] if block.eq_ignore_ascii_case("BLOCK") => {
-            let Ok(milliseconds) = milliseconds.parse::<u64>() else {
+        [block, milliseconds, rest @ ..] if block.eq_ignore_ascii_case(b"BLOCK") => {
+            let Some(milliseconds) =
+                text(milliseconds).and_then(|milliseconds| milliseconds.parse::<u64>().ok())
+            else {
                 return Err(Value::Error(
                     "ERR timeout is not an integer or out of range".into(),
                 ));
@@ -119,7 +122,7 @@ fn parse_xread(args: &[String]) -> Result<(Wait, Vec<PendingRead>), Value> {
     };
 
     let arguments = match rest {
-        [streams, arguments @ ..] if streams.eq_ignore_ascii_case("STREAMS") => arguments,
+        [streams, arguments @ ..] if streams.eq_ignore_ascii_case(b"STREAMS") => arguments,
         [] => return Err(wrong_arity("xread")),
         _ => return Err(Value::Error("ERR syntax error".into())),
     };
@@ -138,9 +141,10 @@ fn parse_xread(args: &[String]) -> Result<(Wait, Vec<PendingRead>), Value> {
     for (key, id) in keys.iter().zip(ids) {
         // `$` names whichever entry the stream ends at, which only the store
         // can tell us, so it is left open here.
-        let after = match id.as_str() {
-            "$" => None,
-            id => Some(parse_id(id, 0).ok_or_else(invalid_id)?),
+        let after = match text(id) {
+            Some("$") => None,
+            Some(id) => Some(parse_id(id, 0).ok_or_else(invalid_id)?),
+            None => return Err(invalid_id()),
         };
 
         pending.push((key.clone(), after));
@@ -153,7 +157,7 @@ fn parse_xread(args: &[String]) -> Result<(Wait, Vec<PendingRead>), Value> {
 /// the deadline passes.
 async fn wait_for_entries(
     store: &Store,
-    reads: &[(String, EntryId)],
+    reads: &[(Bytes, EntryId)],
     deadline: Option<Instant>,
 ) -> Value {
     loop {
@@ -201,11 +205,11 @@ fn encode_streams(streams: Vec<ReadStream>) -> Value {
 
 /// `XRANGE` also accepts the two ends of the stream in place of an id, so that
 /// a range can be asked for without knowing the first and last ids.
-fn parse_bound(bound: &str, missing_sequence: u64) -> Option<EntryId> {
-    match bound {
+fn parse_bound(bound: &Bytes, missing_sequence: u64) -> Option<EntryId> {
+    match text(bound)? {
         "-" => Some(EntryId::ZERO),
         "+" => Some(EntryId::MAX),
-        _ => parse_id(bound, missing_sequence),
+        id => parse_id(id, missing_sequence),
     }
 }
 
@@ -231,7 +235,7 @@ fn encode_entry(entry: StreamEntry) -> Value {
     }
 
     Value::Array(vec![
-        Value::BulkString(entry.id.to_string()),
+        Value::BulkString(entry.id.to_string().into()),
         Value::Array(fields),
     ])
 }

@@ -1,15 +1,21 @@
 use anyhow::{Result, bail};
+use bytes::Bytes;
+use std::io::Write;
 
 /// The largest bulk string Redis accepts, and so the largest we do.
 const MAX_BULK_LENGTH: usize = 512 * 1024 * 1024;
 
 /// A value in the Redis serialization protocol.
+///
+/// Bulk strings carry raw bytes, because Redis keys and values are binary safe:
+/// a client may store an image or a compressed blob just as easily as a word.
+/// The other kinds only ever come from the server, so they stay text.
 #[derive(Debug, PartialEq)]
 pub enum Value {
     SimpleString(String),
     Error(String),
     Integer(i64),
-    BulkString(String),
+    BulkString(Bytes),
     Array(Vec<Value>),
     /// The null bulk string, used for replies such as a `GET` on a missing key.
     Null,
@@ -18,21 +24,31 @@ pub enum Value {
 }
 
 impl Value {
-    pub fn encode(&self) -> String {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        self.encode_into(&mut encoded);
+        encoded
+    }
+
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        // Writing into a `Vec` cannot fail, so the results are safe to unwrap.
         match self {
-            Value::SimpleString(text) => format!("+{text}\r\n"),
-            Value::Error(message) => format!("-{message}\r\n"),
-            Value::Integer(number) => format!(":{number}\r\n"),
-            Value::BulkString(text) => format!("${}\r\n{text}\r\n", text.len()),
-            Value::Array(values) => {
-                let mut encoded = format!("*{}\r\n", values.len());
-                for value in values {
-                    encoded.push_str(&value.encode());
-                }
-                encoded
+            Value::SimpleString(text) => write!(out, "+{text}\r\n").unwrap(),
+            Value::Error(message) => write!(out, "-{message}\r\n").unwrap(),
+            Value::Integer(number) => write!(out, ":{number}\r\n").unwrap(),
+            Value::BulkString(bytes) => {
+                write!(out, "${}\r\n", bytes.len()).unwrap();
+                out.extend_from_slice(bytes);
+                out.extend_from_slice(b"\r\n");
             }
-            Value::Null => "$-1\r\n".to_string(),
-            Value::NullArray => "*-1\r\n".to_string(),
+            Value::Array(values) => {
+                write!(out, "*{}\r\n", values.len()).unwrap();
+                for value in values {
+                    value.encode_into(out);
+                }
+            }
+            Value::Null => out.extend_from_slice(b"$-1\r\n"),
+            Value::NullArray => out.extend_from_slice(b"*-1\r\n"),
         }
     }
 }
@@ -68,8 +84,8 @@ impl<'a> Parser<'a> {
         };
 
         match kind {
-            b'+' => Ok(Some(Value::SimpleString(text(payload)?))),
-            b'-' => Ok(Some(Value::Error(text(payload)?))),
+            b'+' => Ok(Some(Value::SimpleString(text(payload)?.to_string()))),
+            b'-' => Ok(Some(Value::Error(text(payload)?.to_string()))),
             b':' => Ok(Some(Value::Integer(text(payload)?.parse()?))),
             b'$' => self.bulk_string(payload),
             b'*' => self.array(payload),
@@ -91,7 +107,9 @@ impl<'a> Parser<'a> {
         }
 
         self.pos += len + 2;
-        Ok(Some(Value::BulkString(text(&rest[..len])?)))
+        Ok(Some(Value::BulkString(Bytes::copy_from_slice(
+            &rest[..len],
+        ))))
     }
 
     fn array(&mut self, payload: &[u8]) -> Result<Option<Value>> {
@@ -109,8 +127,10 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn text(bytes: &[u8]) -> Result<String> {
-    Ok(str::from_utf8(bytes)?.to_string())
+/// Only the sizes and the server's own replies are read as text; the payload of
+/// a bulk string is left as bytes.
+fn text(bytes: &[u8]) -> Result<&str> {
+    Ok(str::from_utf8(bytes)?)
 }
 
 #[cfg(test)]
@@ -121,7 +141,7 @@ mod tests {
         Value::Array(
             items
                 .iter()
-                .map(|item| Value::BulkString(item.to_string()))
+                .map(|item| Value::BulkString(Bytes::copy_from_slice(item.as_bytes())))
                 .collect(),
         )
     }
@@ -161,7 +181,17 @@ mod tests {
     }
 
     #[test]
-    fn encodes_a_bulk_string() {
-        assert_eq!(Value::BulkString("hey".into()).encode(), "$3\r\nhey\r\n");
+    fn carries_bytes_that_are_not_text() {
+        let input = b"*1\r\n$3\r\n\xff\x00\xfe\r\n";
+        let expected = Value::Array(vec![Value::BulkString(Bytes::from_static(b"\xff\x00\xfe"))]);
+
+        assert_eq!(parse(input).unwrap(), Some((expected, input.len())));
+    }
+
+    #[test]
+    fn encodes_a_bulk_string_verbatim() {
+        let value = Value::BulkString(Bytes::from_static(b"\xff\x00"));
+
+        assert_eq!(value.encode(), b"$2\r\n\xff\x00\r\n");
     }
 }
