@@ -2,6 +2,7 @@ mod keys;
 mod lists;
 mod streams;
 mod strings;
+mod transactions;
 
 use crate::resp::Value;
 use crate::store::Store;
@@ -34,6 +35,9 @@ pub async fn run(command: Value, store: &Store) -> Value {
         return reply;
     }
     if let Some(reply) = keys::run(&uppercased, args, store) {
+        return reply;
+    }
+    if let Some(reply) = transactions::run(&uppercased, args) {
         return reply;
     }
 
