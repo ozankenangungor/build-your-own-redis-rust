@@ -41,10 +41,7 @@ impl Store {
             return Err(IncrementError::WrongType);
         };
 
-        let number = str::from_utf8(value)
-            .ok()
-            .and_then(|number| number.parse::<i64>().ok())
-            .ok_or(IncrementError::NotAnInteger)?;
+        let number = as_number(value).ok_or(IncrementError::NotAnInteger)?;
         let incremented = number.checked_add(1).ok_or(IncrementError::Overflow)?;
 
         // Writing through the entry leaves whatever expiry it carries in place,
@@ -59,4 +56,51 @@ pub enum IncrementError {
     NotAnInteger,
     Overflow,
     WrongType,
+}
+
+/// Reads a stored value as a number.
+///
+/// Redis only counts a value as one when it is spelled the single way it would
+/// print it back, which is stricter than Rust's own parser: `+1`, `007` and
+/// `-0` are all values that happen to look numeric, not numbers.
+fn as_number(value: &[u8]) -> Option<i64> {
+    let text = str::from_utf8(value).ok()?;
+    let number: i64 = text.parse().ok()?;
+
+    (number.to_string() == text).then_some(number)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::as_number;
+
+    #[test]
+    fn reads_the_numbers_redis_would_read() {
+        for value in ["0", "1", "42", "-1", "9223372036854775807"] {
+            assert_eq!(as_number(value.as_bytes()), value.parse().ok());
+        }
+    }
+
+    #[test]
+    fn turns_down_values_that_only_look_numeric() {
+        for value in [
+            "",
+            "xyz",
+            "+1",
+            "007",
+            "-0",
+            " 1",
+            "1 ",
+            "1.0",
+            "1e3",
+            "0x1",
+            // One past the largest number, and bytes that are not text at all.
+            "9223372036854775808",
+            "\u{fffd}",
+        ] {
+            assert_eq!(as_number(value.as_bytes()), None, "{value:?}");
+        }
+
+        assert_eq!(as_number(b"\xff"), None);
+    }
 }

@@ -107,6 +107,36 @@ fn refuses_to_count_past_the_largest_number() {
 }
 
 #[test]
+fn rejects_a_value_that_is_not_a_number() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "xyz"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["INCR", "foo"]);
+    client.expect_reply("-ERR value is not an integer or out of range\r\n");
+
+    // The value is left exactly as it was.
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$3\r\nxyz\r\n");
+}
+
+#[test]
+fn rejects_values_that_only_look_numeric() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for value in ["", "+1", "007", "-0", " 1", "1.0", "1e3"] {
+        client.send(&["SET", "foo", value]);
+        client.expect_reply("+OK\r\n");
+
+        client.send(&["INCR", "foo"]);
+        client.expect_reply("-ERR value is not an integer or out of range\r\n");
+    }
+}
+
+#[test]
 fn rejects_an_incr_of_a_list() {
     let server = Server::start();
     let mut client = server.connect();
