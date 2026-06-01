@@ -26,13 +26,17 @@ impl Store {
     }
 
     /// Adds one to the number held at `key`, storing and returning the result.
+    /// A key that is not there counts as zero, so counting up from nothing
+    /// leaves a one behind.
     pub fn increment(&self, key: &Bytes) -> Result<i64, IncrementError> {
         let mut state = self.state();
         drop_if_expired(&mut state.entries, key);
 
-        let Some(entry) = state.entries.get_mut(key) else {
-            return Err(IncrementError::NotAnInteger);
-        };
+        let entry = state
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| Entry::new(Data::String(Bytes::from_static(b"0"))));
+
         let Data::String(value) = &mut entry.data else {
             return Err(IncrementError::WrongType);
         };
