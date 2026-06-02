@@ -10,6 +10,10 @@ pub fn run(command: &str, args: &[Bytes]) -> Option<Value> {
             [] => Value::SimpleString("OK".into()),
             _ => wrong_arity("multi"),
         },
+        "EXEC" => match args {
+            [] => Value::Error("ERR EXEC without MULTI".into()),
+            _ => wrong_arity("exec"),
+        },
         _ => return None,
     };
 
