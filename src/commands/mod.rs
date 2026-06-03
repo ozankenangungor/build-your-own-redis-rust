@@ -4,6 +4,8 @@ mod streams;
 mod strings;
 mod transactions;
 
+pub use transactions::Transaction;
+
 use crate::resp::Value;
 use crate::store::Store;
 use bytes::Bytes;
@@ -12,7 +14,7 @@ use bytes::Bytes;
 ///
 /// Each module below claims the commands it knows and returns `None` for the
 /// rest, so adding a command means touching only the module it belongs to.
-pub async fn run(command: Value, store: &Store) -> Value {
+pub async fn run(command: Value, store: &Store, transaction: &mut Transaction) -> Value {
     let Some(parts) = into_parts(command) else {
         return Value::Error("ERR expected an array of bulk strings".into());
     };
@@ -37,7 +39,7 @@ pub async fn run(command: Value, store: &Store) -> Value {
     if let Some(reply) = keys::run(&uppercased, args, store) {
         return reply;
     }
-    if let Some(reply) = transactions::run(&uppercased, args) {
+    if let Some(reply) = transactions::run(&uppercased, args, transaction) {
         return reply;
     }
 
