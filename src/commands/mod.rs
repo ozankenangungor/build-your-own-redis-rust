@@ -27,6 +27,13 @@ pub async fn run(command: Value, store: &Store, transaction: &mut Transaction) -
         return unknown_command(name);
     };
 
+    // Inside a transaction a command is only written down. Nothing runs until
+    // `EXEC`, so the store must not see it yet.
+    if transaction.is_open() && !transactions::steers_a_transaction(&uppercased) {
+        transaction.queue(parts);
+        return Value::SimpleString("QUEUED".into());
+    }
+
     if let Some(reply) = strings::run(&uppercased, args, store) {
         return reply;
     }

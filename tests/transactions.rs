@@ -42,6 +42,62 @@ fn executes_an_empty_transaction() {
 }
 
 #[test]
+fn queues_commands_instead_of_running_them() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut onlooker = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["SET", "foo", "41"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["INCR", "foo"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // Nothing has touched the store, as another connection can attest.
+    onlooker.send(&["GET", "foo"]);
+    onlooker.expect_reply("$-1\r\n");
+}
+
+#[test]
+fn queues_reads_as_well_as_writes() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "bar"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    // Even a command that would only look at the store waits its turn.
+    client.send(&["GET", "foo"]);
+    client.expect_reply("+QUEUED\r\n");
+}
+
+#[test]
+fn queues_nothing_for_the_connection_outside_the_transaction() {
+    let server = Server::start();
+    let mut inside = server.connect();
+    let mut outside = server.connect();
+
+    inside.send(&["MULTI"]);
+    inside.expect_reply("+OK\r\n");
+
+    inside.send(&["SET", "foo", "41"]);
+    inside.expect_reply("+QUEUED\r\n");
+
+    // The other client is not in a transaction, so its commands run at once.
+    outside.send(&["SET", "bar", "baz"]);
+    outside.expect_reply("+OK\r\n");
+
+    outside.send(&["GET", "bar"]);
+    outside.expect_reply("$3\r\nbaz\r\n");
+}
+
+#[test]
 fn keeps_a_transaction_to_the_connection_that_started_it() {
     let server = Server::start();
     let mut inside = server.connect();
