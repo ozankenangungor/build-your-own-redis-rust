@@ -9,48 +9,102 @@ pub use transactions::Transaction;
 use crate::resp::Value;
 use crate::store::Store;
 use bytes::Bytes;
+use transactions::Outcome;
+
+/// One command as the client sent it.
+struct Command {
+    /// The name uppercased, since command names are case insensitive.
+    uppercased: String,
+    /// The name as the client spelled it, which is what error messages echo.
+    name: Bytes,
+    args: Vec<Bytes>,
+}
 
 /// Runs one client command and produces the reply to send back.
-///
-/// Each module below claims the commands it knows and returns `None` for the
-/// rest, so adding a command means touching only the module it belongs to.
 pub async fn run(command: Value, store: &Store, transaction: &mut Transaction) -> Value {
-    let Some(parts) = into_parts(command) else {
-        return Value::Error("ERR expected an array of bulk strings".into());
-    };
-    let Some((name, args)) = parts.split_first() else {
-        return Value::Error("ERR empty command".into());
-    };
-
-    // Command names are ASCII, so anything else is unknown by definition.
-    let Some(uppercased) = text(name).map(str::to_uppercase) else {
-        return unknown_command(name);
+    let command = match Command::parse(command) {
+        Ok(command) => command,
+        Err(reply) => return reply,
     };
 
     // Inside a transaction a command is only written down. Nothing runs until
     // `EXEC`, so the store must not see it yet.
-    if transaction.is_open() && !transactions::steers_a_transaction(&uppercased) {
-        transaction.queue(parts);
+    if transaction.is_open() && !transactions::steers_a_transaction(&command.uppercased) {
+        transaction.queue(command);
         return Value::SimpleString("QUEUED".into());
     }
 
-    if let Some(reply) = strings::run(&uppercased, args, store) {
+    match transactions::run(&command, transaction) {
+        Some(Outcome::Reply(reply)) => reply,
+        Some(Outcome::Execute(queued)) => execute(queued, store).await,
+        None => dispatch(&command, store).await,
+    }
+}
+
+/// Runs the commands a transaction had queued, gathering their replies into the
+/// array `EXEC` answers with.
+///
+/// The commands that steer a transaction are never queued, so nothing here can
+/// open or execute another one: this runs one layer below `run` rather than
+/// back through it.
+async fn execute(queued: Vec<Command>, store: &Store) -> Value {
+    let mut replies = Vec::with_capacity(queued.len());
+
+    for command in &queued {
+        replies.push(dispatch(command, store).await);
+    }
+
+    Value::Array(replies)
+}
+
+/// Runs one command against the store.
+///
+/// Each module below claims the commands it knows and returns `None` for the
+/// rest, so adding a command means touching only the module it belongs to.
+async fn dispatch(command: &Command, store: &Store) -> Value {
+    let Command {
+        uppercased,
+        name,
+        args,
+    } = command;
+
+    if let Some(reply) = strings::run(uppercased, args, store) {
         return reply;
     }
-    if let Some(reply) = lists::run(&uppercased, args, store).await {
+    if let Some(reply) = lists::run(uppercased, args, store).await {
         return reply;
     }
-    if let Some(reply) = streams::run(&uppercased, args, store).await {
+    if let Some(reply) = streams::run(uppercased, args, store).await {
         return reply;
     }
-    if let Some(reply) = keys::run(&uppercased, args, store) {
-        return reply;
-    }
-    if let Some(reply) = transactions::run(&uppercased, args, transaction) {
+    if let Some(reply) = keys::run(uppercased, args, store) {
         return reply;
     }
 
     unknown_command(name)
+}
+
+impl Command {
+    /// Reads a command as clients send them: an array of bulk strings, the
+    /// first of which names the command. The error reply says what was wrong.
+    fn parse(command: Value) -> Result<Self, Value> {
+        let Some(parts) = into_parts(command) else {
+            return Err(Value::Error("ERR expected an array of bulk strings".into()));
+        };
+        let Some((name, args)) = parts.split_first() else {
+            return Err(Value::Error("ERR empty command".into()));
+        };
+        // Command names are ASCII, so anything else is unknown by definition.
+        let Some(uppercased) = text(name).map(str::to_uppercase) else {
+            return Err(unknown_command(name));
+        };
+
+        Ok(Self {
+            uppercased,
+            name: name.clone(),
+            args: args.to_vec(),
+        })
+    }
 }
 
 /// Clients send commands as an array of bulk strings; anything else is invalid.

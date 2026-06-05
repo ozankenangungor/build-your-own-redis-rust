@@ -62,6 +62,74 @@ fn queues_commands_instead_of_running_them() {
 }
 
 #[test]
+fn executes_the_queued_commands_in_order() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    for command in [
+        vec!["SET", "foo", "6"],
+        vec!["INCR", "foo"],
+        vec!["INCR", "bar"],
+        vec!["GET", "bar"],
+    ] {
+        client.send(&command);
+        client.expect_reply("+QUEUED\r\n");
+    }
+
+    // One reply per queued command, each keeping the type it would have had on
+    // its own.
+    client.send(&["EXEC"]);
+    client.expect_reply("*4\r\n+OK\r\n:7\r\n:1\r\n$1\r\n1\r\n");
+}
+
+#[test]
+fn leaves_what_the_transaction_did_behind_in_the_store() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut onlooker = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["SET", "foo", "6"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["INCR", "foo"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*2\r\n+OK\r\n:7\r\n");
+
+    onlooker.send(&["GET", "foo"]);
+    onlooker.expect_reply("$1\r\n7\r\n");
+}
+
+#[test]
+fn closes_the_transaction_once_it_has_run() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["SET", "foo", "bar"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+
+    // The queue is gone, so this command runs on its own instead of waiting.
+    client.send(&["SET", "foo", "baz"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("-ERR EXEC without MULTI\r\n");
+}
+
+#[test]
 fn queues_reads_as_well_as_writes() {
     let server = Server::start();
     let mut client = server.connect();
