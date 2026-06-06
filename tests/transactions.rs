@@ -108,6 +108,87 @@ fn leaves_what_the_transaction_did_behind_in_the_store() {
 }
 
 #[test]
+fn carries_a_failure_back_inside_the_replies() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "abc"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "41"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["INCR", "foo"]);
+    client.expect_reply("+QUEUED\r\n");
+    client.send(&["INCR", "bar"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // The failed command takes its place in the array like any other reply.
+    client.send(&["EXEC"]);
+    client.expect_reply("*2\r\n-ERR value is not an integer or out of range\r\n:42\r\n");
+
+    // Failing left the one key alone and did not hold up the other.
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$3\r\nabc\r\n");
+    client.send(&["GET", "bar"]);
+    client.expect_reply("$2\r\n42\r\n");
+}
+
+#[test]
+fn runs_the_commands_that_follow_a_failure() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    for command in [
+        vec!["SET", "foo", "xyz"],
+        vec!["INCR", "foo"],
+        vec!["SET", "bar", "7"],
+    ] {
+        client.send(&command);
+        client.expect_reply("+QUEUED\r\n");
+    }
+
+    client.send(&["EXEC"]);
+    client.expect_reply(concat!(
+        "*3\r\n+OK\r\n",
+        "-ERR value is not an integer or out of range\r\n",
+        "+OK\r\n",
+    ));
+
+    client.send(&["GET", "bar"]);
+    client.expect_reply("$1\r\n7\r\n");
+}
+
+#[test]
+fn carries_back_a_failure_of_the_wrong_type() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["RPUSH", "list_key", "element"]);
+    client.expect_reply(":1\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["GET", "list_key"]);
+    client.expect_reply("+QUEUED\r\n");
+    client.send(&["LLEN", "list_key"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply(concat!(
+        "*2\r\n",
+        "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+        ":1\r\n",
+    ));
+}
+
+#[test]
 fn throws_away_a_transaction_on_discard() {
     let server = Server::start();
     let mut client = server.connect();
