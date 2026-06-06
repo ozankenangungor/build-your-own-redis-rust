@@ -108,6 +108,69 @@ fn leaves_what_the_transaction_did_behind_in_the_store() {
 }
 
 #[test]
+fn throws_away_a_transaction_on_discard() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["SET", "foo", "41"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["INCR", "foo"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["DISCARD"]);
+    client.expect_reply("+OK\r\n");
+
+    // None of the queued commands ever ran.
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$-1\r\n");
+
+    // And the transaction is gone, so there is nothing left to discard.
+    client.send(&["DISCARD"]);
+    client.expect_reply("-ERR DISCARD without MULTI\r\n");
+}
+
+#[test]
+fn refuses_to_discard_a_transaction_that_was_never_started() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["DISCARD"]);
+    client.expect_reply("-ERR DISCARD without MULTI\r\n");
+}
+
+#[test]
+fn leaves_the_connection_ready_for_another_transaction_after_a_discard() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["SET", "foo", "41"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["DISCARD"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["SET", "foo", "bar"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // The abandoned command is not carried over into the new transaction.
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$3\r\nbar\r\n");
+}
+
+#[test]
 fn closes_the_transaction_once_it_has_run() {
     let server = Server::start();
     let mut client = server.connect();

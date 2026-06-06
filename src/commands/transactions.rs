@@ -39,7 +39,7 @@ impl Transaction {
 /// Whether a command steers a transaction rather than takes part in one. These
 /// are the commands that run even while everything else is being queued.
 pub fn steers_a_transaction(command: &str) -> bool {
-    matches!(command, "MULTI" | "EXEC")
+    matches!(command, "MULTI" | "EXEC" | "DISCARD")
 }
 
 /// Handles the commands that make up a transaction.
@@ -61,6 +61,15 @@ pub fn run(command: &Command, transaction: &mut Transaction) -> Option<Outcome> 
             },
             _ => wrong_arity("exec"),
         },
+        "DISCARD" => match command.args.as_slice() {
+            // Dropping the queue is the whole of it: none of those commands
+            // ever reached the store.
+            [] => match transaction.queued.take() {
+                Some(_) => Value::SimpleString("OK".into()),
+                None => discard_without_multi(),
+            },
+            _ => wrong_arity("discard"),
+        },
         _ => return None,
     };
 
@@ -73,4 +82,8 @@ fn nested_multi() -> Value {
 
 fn exec_without_multi() -> Value {
     Value::Error("ERR EXEC without MULTI".into())
+}
+
+fn discard_without_multi() -> Value {
+    Value::Error("ERR DISCARD without MULTI".into())
 }
