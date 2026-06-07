@@ -108,6 +108,60 @@ fn leaves_what_the_transaction_did_behind_in_the_store() {
 }
 
 #[test]
+fn gives_each_connection_its_own_queue() {
+    let server = Server::start();
+    let mut first = server.connect();
+    let mut second = server.connect();
+
+    first.send(&["MULTI"]);
+    first.expect_reply("+OK\r\n");
+    first.send(&["SET", "foo", "41"]);
+    first.expect_reply("+QUEUED\r\n");
+    first.send(&["INCR", "foo"]);
+    first.expect_reply("+QUEUED\r\n");
+
+    // A second transaction opens while the first is still being filled.
+    second.send(&["MULTI"]);
+    second.expect_reply("+OK\r\n");
+    second.send(&["INCR", "foo"]);
+    second.expect_reply("+QUEUED\r\n");
+
+    first.send(&["EXEC"]);
+    first.expect_reply("*2\r\n+OK\r\n:42\r\n");
+
+    // The second transaction runs afterwards, on the store the first left.
+    second.send(&["EXEC"]);
+    second.expect_reply("*1\r\n:43\r\n");
+}
+
+#[test]
+fn ends_one_transaction_without_touching_another() {
+    let server = Server::start();
+    let mut abandoned = server.connect();
+    let mut carried_out = server.connect();
+
+    abandoned.send(&["MULTI"]);
+    abandoned.expect_reply("+OK\r\n");
+    abandoned.send(&["SET", "foo", "abandoned"]);
+    abandoned.expect_reply("+QUEUED\r\n");
+
+    carried_out.send(&["MULTI"]);
+    carried_out.expect_reply("+OK\r\n");
+    carried_out.send(&["SET", "foo", "carried out"]);
+    carried_out.expect_reply("+QUEUED\r\n");
+
+    abandoned.send(&["DISCARD"]);
+    abandoned.expect_reply("+OK\r\n");
+
+    // Discarding one queue leaves the other waiting, still whole.
+    carried_out.send(&["EXEC"]);
+    carried_out.expect_reply("*1\r\n+OK\r\n");
+
+    abandoned.send(&["GET", "foo"]);
+    abandoned.expect_reply("$11\r\ncarried out\r\n");
+}
+
+#[test]
 fn carries_a_failure_back_inside_the_replies() {
     let server = Server::start();
     let mut client = server.connect();
