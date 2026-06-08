@@ -13,7 +13,15 @@ async fn main() -> Result<()> {
     let store = Store::default();
 
     loop {
-        let (stream, addr) = listener.accept().await?;
+        // One failed accept, say because the process is out of file
+        // descriptors, is no reason to take the whole server down with it.
+        let (stream, addr) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(e) => {
+                eprintln!("failed to accept a connection: {e}");
+                continue;
+            }
+        };
         println!("accepted new connection from {addr}");
 
         // Each connection gets its own task, so a slow client cannot keep the
