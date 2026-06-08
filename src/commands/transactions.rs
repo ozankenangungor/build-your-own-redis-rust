@@ -20,19 +20,12 @@ pub enum Outcome {
 }
 
 impl Transaction {
-    // A connection only ever creates a transaction; steering it is the
-    // dispatcher's business, so the rest stays inside `commands`.
-    pub(super) fn is_open(&self) -> bool {
-        self.queued.is_some()
-    }
-
-    /// Writes a command down to be run when `EXEC` arrives. The caller checks
-    /// that a transaction is open first, since that is what tells it to queue
-    /// the command rather than run it.
-    pub(super) fn queue(&mut self, command: Command) {
-        if let Some(queued) = &mut self.queued {
-            queued.push(command);
-        }
+    /// The commands waiting to be run, or `None` when no transaction is open.
+    ///
+    /// A connection only ever creates a transaction; steering it is the
+    /// dispatcher's business, so the rest stays inside `commands`.
+    pub(super) fn queued(&mut self) -> Option<&mut Vec<Command>> {
+        self.queued.as_mut()
     }
 }
 
@@ -47,7 +40,7 @@ pub fn steers_a_transaction(command: &str) -> bool {
 pub fn run(command: &Command, transaction: &mut Transaction) -> Option<Outcome> {
     let reply = match command.uppercased.as_str() {
         "MULTI" => match command.args.as_slice() {
-            [] if transaction.is_open() => nested_multi(),
+            [] if transaction.queued.is_some() => nested_multi(),
             [] => {
                 transaction.queued = Some(Vec::new());
                 Value::SimpleString("OK".into())
