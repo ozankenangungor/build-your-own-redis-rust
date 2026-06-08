@@ -1,5 +1,6 @@
 use super::{Data, Entries, Entry, State, Store, WrongType, drop_if_expired};
 use bytes::Bytes;
+use std::collections::VecDeque;
 use tokio::sync::oneshot;
 
 /// The end of a list a command works from.
@@ -28,18 +29,20 @@ impl Store {
         let entry = state
             .entries
             .entry(key.clone())
-            .or_insert_with(|| Entry::new(Data::List(Vec::new())));
+            .or_insert_with(|| Entry::new(Data::List(VecDeque::new())));
 
         let Data::List(list) = &mut entry.data else {
             return Err(WrongType);
         };
 
         match side {
-            Side::Right => list.extend_from_slice(elements),
+            Side::Right => list.extend(elements.iter().cloned()),
             // Each element lands in front of the one before it, so a single
             // push reverses the order of its arguments.
             Side::Left => {
-                list.splice(0..0, elements.iter().rev().cloned());
+                for element in elements {
+                    list.push_front(element.clone());
+                }
             }
         }
 
@@ -119,13 +122,13 @@ impl Store {
         }
 
         let stop = stop.min(list.len() - 1);
-        Ok(list[start..=stop].to_vec())
+        Ok(list.range(start..=stop).cloned().collect())
     }
 
     /// Returns the length of the list at `key`, or zero if it does not exist.
     pub fn llen(&self, key: &Bytes) -> Result<usize, WrongType> {
         let mut state = self.state();
-        Ok(list_at(&mut state.entries, key)?.map_or(0, Vec::len))
+        Ok(list_at(&mut state.entries, key)?.map_or(0, VecDeque::len))
     }
 }
 
@@ -158,7 +161,10 @@ impl State {
 
 /// Looks up the list stored at `key`. `Ok(None)` means the key is absent, which
 /// list commands treat as an empty list rather than an error.
-fn list_at<'a>(entries: &'a mut Entries, key: &Bytes) -> Result<Option<&'a Vec<Bytes>>, WrongType> {
+fn list_at<'a>(
+    entries: &'a mut Entries,
+    key: &Bytes,
+) -> Result<Option<&'a VecDeque<Bytes>>, WrongType> {
     drop_if_expired(entries, key);
 
     match entries.get(key) {
@@ -180,7 +186,7 @@ fn pop_first(entries: &mut Entries, key: &Bytes) -> Option<Bytes> {
         return None;
     };
 
-    let element = list.remove(0);
+    let element = list.pop_front()?;
     if list.is_empty() {
         entries.remove(key);
     }
@@ -191,10 +197,10 @@ fn pop_first(entries: &mut Entries, key: &Bytes) -> Option<Bytes> {
 fn push_first(entries: &mut Entries, key: &Bytes, element: Bytes) {
     let entry = entries
         .entry(key.clone())
-        .or_insert_with(|| Entry::new(Data::List(Vec::new())));
+        .or_insert_with(|| Entry::new(Data::List(VecDeque::new())));
 
     if let Data::List(list) = &mut entry.data {
-        list.insert(0, element);
+        list.push_front(element);
     }
 }
 

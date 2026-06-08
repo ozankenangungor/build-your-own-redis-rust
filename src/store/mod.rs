@@ -83,7 +83,9 @@ struct Entry {
 
 enum Data {
     String(Bytes),
-    List(Vec<Bytes>),
+    /// Lists are pushed to and popped from both ends, which is what a `VecDeque`
+    /// is for: a `Vec` would shift every element on each `LPUSH` and `LPOP`.
+    List(VecDeque<Bytes>),
     Stream(Vec<streams::StreamEntry>),
 }
 
