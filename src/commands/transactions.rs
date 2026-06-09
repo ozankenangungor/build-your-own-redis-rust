@@ -31,8 +31,12 @@ impl Transaction {
 
 /// Whether a command steers a transaction rather than takes part in one. These
 /// are the commands that run even while everything else is being queued.
+///
+/// `WATCH` belongs here even though it opens no transaction: watching a key is
+/// something a client does *before* `MULTI`, so queueing it would be too late
+/// to be of any use.
 pub fn steers_a_transaction(command: &str) -> bool {
-    matches!(command, "MULTI" | "EXEC" | "DISCARD")
+    matches!(command, "MULTI" | "EXEC" | "DISCARD" | "WATCH")
 }
 
 /// Handles the commands that make up a transaction.
@@ -53,6 +57,13 @@ pub fn run(command: &Command, transaction: &mut Transaction) -> Option<Outcome> 
                 None => exec_without_multi(),
             },
             _ => wrong_arity("exec"),
+        },
+        "WATCH" => match command.args.as_slice() {
+            // Remembering the keys, and holding an `EXEC` that they changed
+            // under, is still to come: for now watching is a promise we make
+            // and do not yet keep.
+            [_key, ..] => Value::SimpleString("OK".into()),
+            [] => wrong_arity("watch"),
         },
         "DISCARD" => match command.args.as_slice() {
             // Dropping the queue is the whole of it: none of those commands

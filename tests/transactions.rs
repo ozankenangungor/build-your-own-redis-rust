@@ -415,3 +415,84 @@ fn rejects_a_multi_with_arguments() {
     client.send(&["EXEC", "foo"]);
     client.expect_reply("-ERR wrong number of arguments for 'exec' command\r\n");
 }
+
+#[test]
+fn watches_a_key() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["WATCH", "foo"]);
+    client.expect_reply("+OK\r\n");
+}
+
+#[test]
+fn watches_several_keys_at_once() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["WATCH", "foo", "bar", "baz"]);
+    client.expect_reply("+OK\r\n");
+}
+
+#[test]
+fn watches_a_key_that_is_not_there() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["WATCH", "missing"]);
+    client.expect_reply("+OK\r\n");
+}
+
+#[test]
+fn accepts_any_casing_of_watch() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for name in ["WATCH", "watch", "WaTcH"] {
+        client.send(&[name, "foo"]);
+        client.expect_reply("+OK\r\n");
+    }
+}
+
+#[test]
+fn rejects_a_watch_without_a_key() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["WATCH"]);
+    client.expect_reply("-ERR wrong number of arguments for 'watch' command\r\n");
+}
+
+#[test]
+fn keeps_serving_the_connection_after_a_watch() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["WATCH", "foo"]);
+    client.expect_reply("+OK\r\n");
+
+    // Watching is not a mode the connection gets stuck in.
+    client.send(&["SET", "foo", "bar"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$3\r\nbar\r\n");
+}
+
+#[test]
+fn runs_a_transaction_opened_after_a_watch() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["WATCH", "counter"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["INCR", "counter"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n:1\r\n");
+}
