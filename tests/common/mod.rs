@@ -24,6 +24,13 @@ impl Server {
     pub fn start() -> Self {
         let port = PORT.lock().unwrap_or_else(|e| e.into_inner());
 
+        // Without this, a server left running from elsewhere would answer every
+        // connection below and the tests would report on a stranger's replies.
+        assert!(
+            TcpStream::connect(ADDR).is_err(),
+            "something is already listening on {ADDR}",
+        );
+
         let process = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())

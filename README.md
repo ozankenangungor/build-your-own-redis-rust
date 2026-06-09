@@ -32,6 +32,8 @@ Beyond the individual commands, the server:
 - expires keys lazily, the way Redis does;
 - blocks clients on `BLPOP` and `XREAD BLOCK`, waking the one that has waited
   longest for a list element and every waiting reader for a stream entry;
+- keeps each connection's transaction to itself, queueing commands between
+  `MULTI` and `EXEC` so that the store sees none of them until the end;
 - replies with the same error messages as Redis, including `WRONGTYPE` and the
   arity and syntax errors.
 
