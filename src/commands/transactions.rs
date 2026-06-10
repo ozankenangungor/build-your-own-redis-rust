@@ -1,5 +1,7 @@
 use super::{Command, wrong_arity};
 use crate::resp::Value;
+use bytes::Bytes;
+use std::collections::HashSet;
 
 /// The transaction a connection is in the middle of.
 ///
@@ -10,6 +12,12 @@ pub struct Transaction {
     /// The commands written down so far. `None` until `MULTI` opens the queue,
     /// which is what tells an open transaction from no transaction at all.
     queued: Option<Vec<Command>>,
+    /// The keys `WATCH` was told to keep an eye on. Watching the same key twice
+    /// is no different from watching it once, so a set is the right shape.
+    ///
+    /// Nothing consults these yet; holding an `EXEC` back over a key that
+    /// changed is what they are being gathered for.
+    watched: HashSet<Bytes>,
 }
 
 /// What the dispatcher is to do with a transaction command.
@@ -59,11 +67,15 @@ pub fn run(command: &Command, transaction: &mut Transaction) -> Option<Outcome> 
             _ => wrong_arity("exec"),
         },
         "WATCH" => match command.args.as_slice() {
-            // Remembering the keys, and holding an `EXEC` that they changed
-            // under, is still to come: for now watching is a promise we make
-            // and do not yet keep.
-            [_key, ..] => Value::SimpleString("OK".into()),
             [] => wrong_arity("watch"),
+            // A transaction is already queueing commands by this point, so
+            // watching now would be asking to be told about changes that the
+            // client has no way left to act on.
+            _ if transaction.queued.is_some() => watch_inside_multi(),
+            keys => {
+                transaction.watched.extend(keys.iter().cloned());
+                Value::SimpleString("OK".into())
+            }
         },
         "DISCARD" => match command.args.as_slice() {
             // Dropping the queue is the whole of it: none of those commands
@@ -82,6 +94,10 @@ pub fn run(command: &Command, transaction: &mut Transaction) -> Option<Outcome> 
 
 fn nested_multi() -> Value {
     Value::Error("ERR MULTI calls can not be nested".into())
+}
+
+fn watch_inside_multi() -> Value {
+    Value::Error("ERR WATCH inside MULTI is not allowed".into())
 }
 
 fn exec_without_multi() -> Value {

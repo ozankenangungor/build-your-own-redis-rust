@@ -496,3 +496,94 @@ fn runs_a_transaction_opened_after_a_watch() {
     client.send(&["EXEC"]);
     client.expect_reply("*1\r\n:1\r\n");
 }
+
+#[test]
+fn refuses_to_watch_inside_a_transaction() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("-ERR WATCH inside MULTI is not allowed\r\n");
+}
+
+#[test]
+fn refuses_to_watch_inside_a_transaction_that_already_has_commands() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["SET", "foo", "bar"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["WATCH", "foo"]);
+    client.expect_reply("-ERR WATCH inside MULTI is not allowed\r\n");
+}
+
+#[test]
+fn refuses_a_watch_without_a_key_before_one_inside_a_transaction() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    // How the command is spelled is settled before what it would mean here.
+    client.send(&["WATCH"]);
+    client.expect_reply("-ERR wrong number of arguments for 'watch' command\r\n");
+}
+
+#[test]
+fn leaves_the_transaction_running_after_a_refused_watch() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("-ERR WATCH inside MULTI is not allowed\r\n");
+
+    // The refusal turns down the one command, not the transaction around it.
+    client.send(&["SET", "foo", "bar"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+}
+
+#[test]
+fn watches_again_once_the_transaction_is_over() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*0\r\n");
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+}
+
+#[test]
+fn keeps_a_refused_watch_to_the_connection_that_sent_it() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut onlooker = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("-ERR WATCH inside MULTI is not allowed\r\n");
+
+    // The other connection is in no transaction, so watching is open to it.
+    onlooker.send(&["WATCH", "key"]);
+    onlooker.expect_reply("+OK\r\n");
+}
