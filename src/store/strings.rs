@@ -4,11 +4,13 @@ use std::time::{Duration, Instant};
 
 impl Store {
     pub fn set(&self, key: Bytes, value: Bytes, expires_in: Option<Duration>) {
+        let mut state = self.state();
         let entry = Entry {
             data: Data::String(value),
             expires_at: expires_in.map(|delay| Instant::now() + delay),
+            version: state.next_version(),
         };
-        self.state().entries.insert(key, entry);
+        state.entries.insert(key, entry);
     }
 
     pub fn get(&self, key: &Bytes) -> Result<Option<Bytes>, WrongType> {
@@ -32,10 +34,11 @@ impl Store {
         let mut state = self.state();
         drop_if_expired(&mut state.entries, key);
 
+        let version = state.next_version();
         let entry = state
             .entries
             .entry(key.clone())
-            .or_insert_with(|| Entry::new(Data::String(Bytes::from_static(b"0"))));
+            .or_insert_with(|| Entry::new(Data::String(Bytes::from_static(b"0")), version));
 
         let Data::String(value) = &mut entry.data else {
             return Err(IncrementError::WrongType);
@@ -47,6 +50,8 @@ impl Store {
         // Writing through the entry leaves whatever expiry it carries in place,
         // since counting up is not the same as setting the key anew.
         *value = Bytes::from(incremented.to_string());
+        entry.version = version;
+
         Ok(incremented)
     }
 }

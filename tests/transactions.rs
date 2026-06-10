@@ -587,3 +587,388 @@ fn keeps_a_refused_watch_to_the_connection_that_sent_it() {
     onlooker.send(&["WATCH", "key"]);
     onlooker.expect_reply("+OK\r\n");
 }
+
+#[test]
+fn abandons_a_transaction_whose_watched_key_changed() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["SET", "foo", "100"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "200"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "foo"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "300"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    meddler.send(&["SET", "foo", "200"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+
+    // None of the queued commands ran, so `bar` is as it was.
+    client.send(&["GET", "bar"]);
+    client.expect_reply("$3\r\n200\r\n");
+}
+
+#[test]
+fn runs_a_transaction_when_another_key_changed() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["SET", "baz", "100"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "baz"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "caz", "400"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // A key nobody is watching changing is nothing to the transaction.
+    meddler.send(&["SET", "caz", "300"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+
+    meddler.send(&["GET", "caz"]);
+    meddler.expect_reply("$3\r\n400\r\n");
+}
+
+#[test]
+fn runs_a_transaction_whose_watched_key_stood_still() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "counter", "1"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "counter"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["INCR", "counter"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n:2\r\n");
+}
+
+#[test]
+fn notices_every_kind_of_change_to_a_watched_key() {
+    let server = Server::start();
+
+    // One case per command that writes, so that no command can go on quietly
+    // changing a key while a client watches it.
+    for (key, setup, setup_reply, change, change_reply) in [
+        (
+            "string",
+            vec!["SET", "string", "1"],
+            "+OK\r\n",
+            vec!["SET", "string", "2"],
+            "+OK\r\n",
+        ),
+        (
+            "counter",
+            vec!["SET", "counter", "1"],
+            "+OK\r\n",
+            vec!["INCR", "counter"],
+            ":2\r\n",
+        ),
+        (
+            "right",
+            vec!["RPUSH", "right", "a"],
+            ":1\r\n",
+            vec!["RPUSH", "right", "b"],
+            ":2\r\n",
+        ),
+        (
+            "left",
+            vec!["RPUSH", "left", "a"],
+            ":1\r\n",
+            vec!["LPUSH", "left", "b"],
+            ":2\r\n",
+        ),
+        (
+            "popped",
+            vec!["RPUSH", "popped", "a", "b"],
+            ":2\r\n",
+            vec!["LPOP", "popped"],
+            "$1\r\na\r\n",
+        ),
+        (
+            "stream",
+            vec!["XADD", "stream", "1-1", "f", "v"],
+            "$3\r\n1-1\r\n",
+            vec!["XADD", "stream", "1-2", "f", "v"],
+            "$3\r\n1-2\r\n",
+        ),
+    ] {
+        let mut client = server.connect();
+        let mut meddler = server.connect();
+
+        client.send(&setup);
+        client.expect_reply(setup_reply);
+
+        client.send(&["WATCH", key]);
+        client.expect_reply("+OK\r\n");
+
+        client.send(&["MULTI"]);
+        client.expect_reply("+OK\r\n");
+        client.send(&["PING"]);
+        client.expect_reply("+QUEUED\r\n");
+
+        meddler.send(&change);
+        meddler.expect_reply(change_reply);
+
+        client.send(&["EXEC"]);
+        client.expect_reply("*-1\r\n");
+    }
+}
+
+#[test]
+fn notices_a_watched_key_that_was_not_there_appearing() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["WATCH", "missing"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    meddler.send(&["SET", "missing", "here now"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+}
+
+#[test]
+fn notices_a_watched_key_going_away() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["RPUSH", "list", "only"]);
+    client.expect_reply(":1\r\n");
+
+    client.send(&["WATCH", "list"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // Popping the last element takes the key with it.
+    meddler.send(&["LPOP", "list"]);
+    meddler.expect_reply("$4\r\nonly\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+}
+
+#[test]
+fn notices_a_watched_key_written_again_with_the_same_value() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["SET", "key", "same"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // Redis watches for writes, not for values, and so do we.
+    meddler.send(&["SET", "key", "same"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+}
+
+#[test]
+fn notices_a_watched_key_that_expired() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "brief", "here", "PX", "50"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "brief"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+}
+
+#[test]
+fn overlooks_a_change_made_before_the_key_was_watched() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    meddler.send(&["SET", "key", "before"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["GET", "key"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n$6\r\nbefore\r\n");
+}
+
+#[test]
+fn overlooks_a_read_of_a_watched_key() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut onlooker = server.connect();
+
+    client.send(&["SET", "key", "value"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // Looking at a key is not changing it.
+    onlooker.send(&["GET", "key"]);
+    onlooker.expect_reply("$5\r\nvalue\r\n");
+    onlooker.send(&["TYPE", "key"]);
+    onlooker.expect_reply("+string\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+PONG\r\n");
+}
+
+#[test]
+fn abandons_a_transaction_when_any_of_the_watched_keys_changed() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["WATCH", "first", "second", "third"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    meddler.send(&["SET", "second", "moved"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+}
+
+#[test]
+fn watches_the_key_only_for_the_connection_that_asked() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut other = server.connect();
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    // The other connection watches nothing, so the same change leaves it alone.
+    other.send(&["MULTI"]);
+    other.expect_reply("+OK\r\n");
+    other.send(&["PING"]);
+    other.expect_reply("+QUEUED\r\n");
+
+    client.send(&["SET", "key", "changed"]);
+    client.expect_reply("+OK\r\n");
+
+    other.send(&["EXEC"]);
+    other.expect_reply("*1\r\n+PONG\r\n");
+}
+
+#[test]
+fn overlooks_what_the_transaction_itself_writes_to_a_watched_key() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "key", "before"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "key", "after"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // The check comes first, so a transaction is never stopped by its own hand.
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+
+    client.send(&["GET", "key"]);
+    client.expect_reply("$5\r\nafter\r\n");
+}
+
+#[test]
+fn starts_watching_afresh_after_a_transaction_has_run() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "key", "written"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+
+    // The watch was for that transaction, and the write it made must not go on
+    // to stop the next one.
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+PONG\r\n");
+}

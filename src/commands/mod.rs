@@ -36,7 +36,7 @@ pub async fn run(command: Value, store: &Store, transaction: &mut Transaction) -
         return Value::SimpleString("QUEUED".into());
     }
 
-    match transactions::run(&command, transaction) {
+    match transactions::run(&command, transaction, store) {
         Some(Outcome::Reply(reply)) => reply,
         Some(Outcome::Execute(queued)) => execute(queued, store).await,
         None => dispatch(&command, store).await,

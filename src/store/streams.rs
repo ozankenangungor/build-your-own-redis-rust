@@ -118,10 +118,11 @@ impl Store {
         let mut state = self.state();
         drop_if_expired(&mut state.entries, key);
 
+        let version = state.next_version();
         let entry = state
             .entries
             .entry(key.clone())
-            .or_insert_with(|| Entry::new(Data::Stream(Vec::new())));
+            .or_insert_with(|| Entry::new(Data::Stream(Vec::new()), version));
 
         let Data::Stream(stream) = &mut entry.data else {
             return Err(XaddError::WrongType);
@@ -135,6 +136,7 @@ impl Store {
         }
 
         stream.push(StreamEntry { id, fields });
+        entry.version = version;
         state.wake_watchers(key);
 
         Ok(id)

@@ -39,6 +39,9 @@ struct State {
     /// Clients waiting for a stream to grow. Every one of them is woken, since
     /// reading an entry does not take it away from the others.
     watchers: HashMap<Bytes, Vec<Arc<Notify>>>,
+    /// Counts the changes made to any key. Versions are only ever compared for
+    /// equality, so all that matters is that no number is handed out twice.
+    changes: u64,
 }
 
 type Entries = HashMap<Bytes, Entry>;
@@ -67,6 +70,38 @@ impl Store {
         }
     }
 
+    /// The version `key` holds now, for a client that wants to be told should
+    /// it change. `None` means there is no such key, which is a state of its
+    /// own: a key that appears later has changed just as surely as one rewritten.
+    pub fn version(&self, key: &Bytes) -> Option<u64> {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        state.entries.get(key).map(|entry| entry.version)
+    }
+
+    /// Whether every one of these keys still holds the version it did when it
+    /// was looked at. They are checked together under one lock, so no write can
+    /// slip between two of them.
+    ///
+    /// A version is carried by the entry itself, which leaves one change
+    /// invisible: a key that was missing when it was watched, then made and
+    /// unmade again, is missing once more and so reads as untouched. Catching
+    /// that would mean keeping a record of every key ever deleted, or having
+    /// each write seek out the clients watching it, and neither is worth what
+    /// it costs here.
+    pub fn unchanged<'a>(
+        &self,
+        watched: impl IntoIterator<Item = (&'a Bytes, &'a Option<u64>)>,
+    ) -> bool {
+        let mut state = self.state();
+
+        watched.into_iter().all(|(key, version)| {
+            drop_if_expired(&mut state.entries, key);
+            state.entries.get(key).map(|entry| entry.version) == *version
+        })
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         // A panic elsewhere poisons the lock but leaves the state intact, so
         // recover rather than taking down every other connection with it.
@@ -76,9 +111,23 @@ impl Store {
     }
 }
 
+impl State {
+    /// The number to stamp the next change with.
+    ///
+    /// One counter serves every key, so a key that is deleted and made again
+    /// never comes back wearing a version a client saw before.
+    fn next_version(&mut self) -> u64 {
+        self.changes += 1;
+        self.changes
+    }
+}
+
 struct Entry {
     data: Data,
     expires_at: Option<Instant>,
+    /// When this entry was last changed, so that a client watching the key can
+    /// tell whether anything happened to it while it was not looking.
+    version: u64,
 }
 
 enum Data {
@@ -90,10 +139,11 @@ enum Data {
 }
 
 impl Entry {
-    fn new(data: Data) -> Self {
+    fn new(data: Data, version: u64) -> Self {
         Self {
             data,
             expires_at: None,
+            version,
         }
     }
 

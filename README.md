@@ -34,6 +34,8 @@ Beyond the individual commands, the server:
   longest for a list element and every waiting reader for a stream entry;
 - keeps each connection's transaction to itself, queueing commands between
   `MULTI` and `EXEC` so that the store sees none of them until the end;
+- abandons a transaction whose `WATCH`ed keys were changed by someone else in
+  the meantime, which is how Redis locks without holding a lock;
 - replies with the same error messages as Redis, including `WRONGTYPE` and the
   arity and syntax errors.
 

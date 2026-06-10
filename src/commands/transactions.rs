@@ -1,7 +1,9 @@
 use super::{Command, wrong_arity};
 use crate::resp::Value;
+use crate::store::Store;
 use bytes::Bytes;
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::mem;
 
 /// The transaction a connection is in the middle of.
 ///
@@ -12,12 +14,10 @@ pub struct Transaction {
     /// The commands written down so far. `None` until `MULTI` opens the queue,
     /// which is what tells an open transaction from no transaction at all.
     queued: Option<Vec<Command>>,
-    /// The keys `WATCH` was told to keep an eye on. Watching the same key twice
-    /// is no different from watching it once, so a set is the right shape.
-    ///
-    /// Nothing consults these yet; holding an `EXEC` back over a key that
-    /// changed is what they are being gathered for.
-    watched: HashSet<Bytes>,
+    /// The keys `WATCH` was told to keep an eye on, each with the version it
+    /// held at the time. `None` records a key that was not there, which is a
+    /// state to be changed away from like any other.
+    watched: HashMap<Bytes, Option<u64>>,
 }
 
 /// What the dispatcher is to do with a transaction command.
@@ -49,7 +49,7 @@ pub fn steers_a_transaction(command: &str) -> bool {
 
 /// Handles the commands that make up a transaction.
 /// `None` means the command belongs to another module.
-pub fn run(command: &Command, transaction: &mut Transaction) -> Option<Outcome> {
+pub fn run(command: &Command, transaction: &mut Transaction, store: &Store) -> Option<Outcome> {
     let reply = match command.uppercased.as_str() {
         "MULTI" => match command.args.as_slice() {
             [] if transaction.queued.is_some() => nested_multi(),
@@ -61,7 +61,20 @@ pub fn run(command: &Command, transaction: &mut Transaction) -> Option<Outcome> 
         },
         "EXEC" => match command.args.as_slice() {
             [] => match transaction.queued.take() {
-                Some(queued) => return Some(Outcome::Execute(queued)),
+                Some(queued) => {
+                    // The keys were watched for the sake of this transaction,
+                    // so the watch ends with it either way.
+                    let watched = mem::take(&mut transaction.watched);
+
+                    if store.unchanged(&watched) {
+                        return Some(Outcome::Execute(queued));
+                    }
+
+                    // Something moved under the transaction, so none of it
+                    // runs. The null array tells this apart from a transaction
+                    // that ran and had nothing to say.
+                    Value::NullArray
+                }
                 None => exec_without_multi(),
             },
             _ => wrong_arity("exec"),
@@ -73,7 +86,15 @@ pub fn run(command: &Command, transaction: &mut Transaction) -> Option<Outcome> 
             // client has no way left to act on.
             _ if transaction.queued.is_some() => watch_inside_multi(),
             keys => {
-                transaction.watched.extend(keys.iter().cloned());
+                for key in keys {
+                    // Watching a key a second time keeps the first reading, so
+                    // that a change already missed is not forgotten.
+                    transaction
+                        .watched
+                        .entry(key.clone())
+                        .or_insert_with(|| store.version(key));
+                }
+
                 Value::SimpleString("OK".into())
             }
         },

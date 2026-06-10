@@ -26,10 +26,11 @@ impl Store {
         let state = &mut *guard;
         drop_if_expired(&mut state.entries, key);
 
+        let version = state.next_version();
         let entry = state
             .entries
             .entry(key.clone())
-            .or_insert_with(|| Entry::new(Data::List(VecDeque::new())));
+            .or_insert_with(|| Entry::new(Data::List(VecDeque::new()), version));
 
         let Data::List(list) = &mut entry.data else {
             return Err(WrongType);
@@ -49,7 +50,8 @@ impl Store {
         // Redis answers the pushing client with the length before handing
         // anything to blocked clients, so measure it now.
         let length = list.len();
-        state.wake_waiters(key);
+        entry.version = version;
+        state.wake_waiters(key, version);
 
         Ok(length)
     }
@@ -60,6 +62,7 @@ impl Store {
         let mut state = self.state();
         drop_if_expired(&mut state.entries, key);
 
+        let version = state.next_version();
         let Some(entry) = state.entries.get_mut(key) else {
             return Ok(Vec::new());
         };
@@ -67,8 +70,15 @@ impl Store {
             return Err(WrongType);
         };
 
-        let removed = list.drain(..count.min(list.len())).collect();
-        if list.is_empty() {
+        let removed: Vec<Bytes> = list.drain(..count.min(list.len())).collect();
+        let emptied = list.is_empty();
+
+        // A pop that took nothing left the key as it found it, and a client
+        // watching it has no reason to hear about it.
+        if !removed.is_empty() {
+            entry.version = version;
+        }
+        if emptied {
             state.entries.remove(key);
         }
 
@@ -101,7 +111,9 @@ impl Store {
             }
         }
 
-        let element = pop_first(&mut state.entries, key).expect("a stored list is never empty");
+        let version = state.next_version();
+        let element =
+            pop_first(&mut state.entries, key, version).expect("a stored list is never empty");
         Ok(Blocked::Ready(element))
     }
 
@@ -135,13 +147,13 @@ impl Store {
 impl State {
     /// Hands the elements at `key` to the clients blocked on it, serving the
     /// one that has been waiting the longest first.
-    fn wake_waiters(&mut self, key: &Bytes) {
+    fn wake_waiters(&mut self, key: &Bytes, version: u64) {
         let Some(queue) = self.waiters.get_mut(key) else {
             return;
         };
 
         while let Some(waiter) = queue.pop_front() {
-            let Some(element) = pop_first(&mut self.entries, key) else {
+            let Some(element) = pop_first(&mut self.entries, key, version) else {
                 queue.push_front(waiter);
                 break;
             };
@@ -149,7 +161,7 @@ impl State {
             // A client that gave up in the meantime leaves its element behind
             // for whoever is next in line.
             if let Err(element) = waiter.send(element) {
-                push_first(&mut self.entries, key, element);
+                push_first(&mut self.entries, key, element, version);
             }
         }
 
@@ -177,30 +189,31 @@ fn list_at<'a>(
     }
 }
 
-fn pop_first(entries: &mut Entries, key: &Bytes) -> Option<Bytes> {
-    let Some(Entry {
-        data: Data::List(list),
-        ..
-    }) = entries.get_mut(key)
-    else {
+fn pop_first(entries: &mut Entries, key: &Bytes, version: u64) -> Option<Bytes> {
+    let entry = entries.get_mut(key)?;
+    let Data::List(list) = &mut entry.data else {
         return None;
     };
 
     let element = list.pop_front()?;
-    if list.is_empty() {
+    let emptied = list.is_empty();
+    entry.version = version;
+
+    if emptied {
         entries.remove(key);
     }
 
     Some(element)
 }
 
-fn push_first(entries: &mut Entries, key: &Bytes, element: Bytes) {
+fn push_first(entries: &mut Entries, key: &Bytes, element: Bytes, version: u64) {
     let entry = entries
         .entry(key.clone())
-        .or_insert_with(|| Entry::new(Data::List(VecDeque::new())));
+        .or_insert_with(|| Entry::new(Data::List(VecDeque::new()), version));
 
     if let Data::List(list) = &mut entry.data {
         list.push_front(element);
+        entry.version = version;
     }
 }
 
