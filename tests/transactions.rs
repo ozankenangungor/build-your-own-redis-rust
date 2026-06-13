@@ -972,3 +972,58 @@ fn starts_watching_afresh_after_a_transaction_has_run() {
     client.send(&["EXEC"]);
     client.expect_reply("*1\r\n+PONG\r\n");
 }
+
+#[test]
+fn abandons_a_transaction_when_one_of_two_watched_keys_changed() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["SET", "foo", "100"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "200"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "foo", "bar"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "300"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // The key that changed is not the one the transaction writes to, and not
+    // the one named first: any of them is enough.
+    meddler.send(&["SET", "foo", "200"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+
+    meddler.send(&["GET", "bar"]);
+    meddler.expect_reply("$3\r\n200\r\n");
+}
+
+#[test]
+fn runs_a_transaction_when_none_of_the_watched_keys_changed() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["SET", "foo", "100"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "foo", "bar", "missing"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "300"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    meddler.send(&["SET", "elsewhere", "moved"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+}
