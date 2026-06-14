@@ -1027,3 +1027,69 @@ fn runs_a_transaction_when_none_of_the_watched_keys_changed() {
     client.send(&["EXEC"]);
     client.expect_reply("*1\r\n+OK\r\n");
 }
+
+#[test]
+fn abandons_a_transaction_whose_watched_key_was_created_meanwhile() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    // Nothing is stored under this key yet, and that absence is what is being
+    // watched: coming into existence is a change like any other.
+    client.send(&["WATCH", "foo"]);
+    client.expect_reply("+OK\r\n");
+
+    meddler.send(&["SET", "foo", "200"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "foo", "300"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$3\r\n200\r\n");
+}
+
+#[test]
+fn runs_a_transaction_whose_watched_key_never_appeared() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["WATCH", "never"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "elsewhere", "written"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // A key that was missing and stayed missing has not changed.
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+}
+
+#[test]
+fn notices_a_watched_key_first_seen_as_a_list() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["WATCH", "list"]);
+    client.expect_reply("+OK\r\n");
+
+    // Whatever kind of value fills the key, filling it is the change.
+    meddler.send(&["RPUSH", "list", "first"]);
+    meddler.expect_reply(":1\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+}
