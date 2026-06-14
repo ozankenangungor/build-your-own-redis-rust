@@ -1093,3 +1093,131 @@ fn notices_a_watched_key_first_seen_as_a_list() {
     client.send(&["EXEC"]);
     client.expect_reply("*-1\r\n");
 }
+
+#[test]
+fn stops_watching_on_unwatch() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["SET", "foo", "100"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "200"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "foo", "bar"]);
+    client.expect_reply("+OK\r\n");
+
+    meddler.send(&["SET", "foo", "200"]);
+    meddler.expect_reply("+OK\r\n");
+
+    // The key did change, but the client has said it no longer cares.
+    client.send(&["UNWATCH"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "foo", "400"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+
+    meddler.send(&["GET", "foo"]);
+    meddler.expect_reply("$3\r\n400\r\n");
+}
+
+#[test]
+fn unwatches_when_nothing_was_being_watched() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["UNWATCH"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["UNWATCH"]);
+    client.expect_reply("+OK\r\n");
+}
+
+#[test]
+fn accepts_any_casing_of_unwatch() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for name in ["UNWATCH", "unwatch", "UnWaTcH"] {
+        client.send(&[name]);
+        client.expect_reply("+OK\r\n");
+    }
+}
+
+#[test]
+fn rejects_an_unwatch_with_arguments() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    // Unwatching is all or nothing: there is no key to name.
+    client.send(&["UNWATCH", "key"]);
+    client.expect_reply("-ERR wrong number of arguments for 'unwatch' command\r\n");
+}
+
+#[test]
+fn watches_again_after_an_unwatch() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["UNWATCH"]);
+    client.expect_reply("+OK\r\n");
+
+    // Unwatching clears what was watched, not the ability to watch.
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    meddler.send(&["SET", "key", "changed"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+}
+
+#[test]
+fn unwatches_only_for_the_connection_that_asked() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut other = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+    other.send(&["WATCH", "key"]);
+    other.expect_reply("+OK\r\n");
+
+    client.send(&["UNWATCH"]);
+    client.expect_reply("+OK\r\n");
+
+    meddler.send(&["SET", "key", "changed"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+PONG\r\n");
+
+    // The other connection never unwatched, so the same change still stops it.
+    other.send(&["MULTI"]);
+    other.expect_reply("+OK\r\n");
+    other.send(&["PING"]);
+    other.expect_reply("+QUEUED\r\n");
+    other.send(&["EXEC"]);
+    other.expect_reply("*-1\r\n");
+}

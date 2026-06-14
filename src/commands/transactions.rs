@@ -43,8 +43,13 @@ impl Transaction {
 /// `WATCH` belongs here even though it opens no transaction: watching a key is
 /// something a client does *before* `MULTI`, so queueing it would be too late
 /// to be of any use.
+///
+/// Redis queues an `UNWATCH` sent inside a transaction rather than running it,
+/// which we do not: keeping it here spares the queue a command that the store
+/// knows nothing about, at the price of a client that gives up its watches
+/// mid-transaction being taken at its word straight away.
 pub fn steers_a_transaction(command: &str) -> bool {
-    matches!(command, "MULTI" | "EXEC" | "DISCARD" | "WATCH")
+    matches!(command, "MULTI" | "EXEC" | "DISCARD" | "WATCH" | "UNWATCH")
 }
 
 /// Handles the commands that make up a transaction.
@@ -97,6 +102,15 @@ pub fn run(command: &Command, transaction: &mut Transaction, store: &Store) -> O
 
                 Value::SimpleString("OK".into())
             }
+        },
+        "UNWATCH" => match command.args.as_slice() {
+            // Watching nothing is a fine thing to stop doing, so there is no
+            // counterpart here to `EXEC without MULTI`.
+            [] => {
+                transaction.watched.clear();
+                Value::SimpleString("OK".into())
+            }
+            _ => wrong_arity("unwatch"),
         },
         "DISCARD" => match command.args.as_slice() {
             // Dropping the queue is the whole of it: none of those commands
