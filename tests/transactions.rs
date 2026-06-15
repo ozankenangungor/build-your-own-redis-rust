@@ -1274,3 +1274,98 @@ fn rejects_a_queued_unwatch_with_arguments_when_it_runs() {
     client.send(&["EXEC"]);
     client.expect_reply("*1\r\n-ERR wrong number of arguments for 'unwatch' command\r\n");
 }
+
+#[test]
+fn stops_watching_once_a_transaction_has_been_abandoned() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["SET", "foo", "100"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "200"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "foo"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "300"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    meddler.send(&["SET", "foo", "200"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+
+    // The watch was spent on the transaction that was abandoned, and must not
+    // go on to stop this one, which watched nothing.
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "300"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+
+    meddler.send(&["GET", "bar"]);
+    meddler.expect_reply("$3\r\n300\r\n");
+}
+
+#[test]
+fn stops_watching_a_key_that_changed_again_after_a_transaction_ran() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // This one runs, since nothing had touched the key yet.
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+PONG\r\n");
+
+    meddler.send(&["SET", "key", "changed"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+PONG\r\n");
+}
+
+#[test]
+fn stops_watching_after_an_empty_transaction() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    // A transaction with nothing in it still spends the watch.
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["EXEC"]);
+    client.expect_reply("*0\r\n");
+
+    meddler.send(&["SET", "key", "changed"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+PONG\r\n");
+}
