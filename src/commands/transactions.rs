@@ -42,19 +42,14 @@ impl Transaction {
 ///
 /// `WATCH` belongs here even though it opens no transaction: watching a key is
 /// something a client does *before* `MULTI`, so queueing it would be too late
-/// to be of any use.
-///
-/// Redis queues an `UNWATCH` sent inside a transaction rather than running it,
-/// which we do not: keeping it here spares the queue a command that the store
-/// knows nothing about, at the price of a client that gives up its watches
-/// mid-transaction being taken at its word straight away.
+/// to be of any use. `UNWATCH` does not, and is queued like any other command.
 pub fn steers_a_transaction(command: &str) -> bool {
-    matches!(command, "MULTI" | "EXEC" | "DISCARD" | "WATCH" | "UNWATCH")
+    matches!(command, "MULTI" | "EXEC" | "DISCARD" | "WATCH")
 }
 
-/// Handles the commands that make up a transaction.
-/// `None` means the command belongs to another module.
-pub fn run(command: &Command, transaction: &mut Transaction, store: &Store) -> Option<Outcome> {
+/// Handles the commands that steer a transaction, which are the ones a
+/// transaction never queues. `None` means the command is not one of them.
+pub fn steer(command: &Command, transaction: &mut Transaction, store: &Store) -> Option<Outcome> {
     let reply = match command.uppercased.as_str() {
         "MULTI" => match command.args.as_slice() {
             [] if transaction.queued.is_some() => nested_multi(),
@@ -103,15 +98,6 @@ pub fn run(command: &Command, transaction: &mut Transaction, store: &Store) -> O
                 Value::SimpleString("OK".into())
             }
         },
-        "UNWATCH" => match command.args.as_slice() {
-            // Watching nothing is a fine thing to stop doing, so there is no
-            // counterpart here to `EXEC without MULTI`.
-            [] => {
-                transaction.watched.clear();
-                Value::SimpleString("OK".into())
-            }
-            _ => wrong_arity("unwatch"),
-        },
         "DISCARD" => match command.args.as_slice() {
             // Dropping the queue is the whole of it: none of those commands
             // ever reached the store.
@@ -125,6 +111,25 @@ pub fn run(command: &Command, transaction: &mut Transaction, store: &Store) -> O
     };
 
     Some(Outcome::Reply(reply))
+}
+
+/// Handles the transaction commands that take part in a transaction rather
+/// than steer it, and so are queued like the commands of any other family.
+pub fn run(command: &str, args: &[Bytes], transaction: &mut Transaction) -> Option<Value> {
+    let reply = match command {
+        "UNWATCH" => match args {
+            // Watching nothing is a fine thing to stop doing, so there is no
+            // counterpart here to `EXEC without MULTI`.
+            [] => {
+                transaction.watched.clear();
+                Value::SimpleString("OK".into())
+            }
+            _ => wrong_arity("unwatch"),
+        },
+        _ => return None,
+    };
+
+    Some(reply)
 }
 
 fn nested_multi() -> Value {

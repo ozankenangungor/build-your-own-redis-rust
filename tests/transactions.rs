@@ -1221,3 +1221,56 @@ fn unwatches_only_for_the_connection_that_asked() {
     other.send(&["EXEC"]);
     other.expect_reply("*-1\r\n");
 }
+
+#[test]
+fn queues_an_unwatch_sent_inside_a_transaction() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+
+    // Unlike `WATCH`, this one is a command like any other once a transaction
+    // is under way, and so waits its turn.
+    client.send(&["UNWATCH"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+}
+
+#[test]
+fn abandons_a_transaction_that_queued_an_unwatch_too_late() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    meddler.send(&["SET", "key", "changed"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["UNWATCH"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // Queued, the `UNWATCH` cannot call off a watch that `EXEC` checks first.
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+}
+
+#[test]
+fn rejects_a_queued_unwatch_with_arguments_when_it_runs() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["UNWATCH", "key"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n-ERR wrong number of arguments for 'unwatch' command\r\n");
+}

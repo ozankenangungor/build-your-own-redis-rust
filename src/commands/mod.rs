@@ -36,10 +36,10 @@ pub async fn run(command: Value, store: &Store, transaction: &mut Transaction) -
         return Value::SimpleString("QUEUED".into());
     }
 
-    match transactions::run(&command, transaction, store) {
+    match transactions::steer(&command, transaction, store) {
         Some(Outcome::Reply(reply)) => reply,
-        Some(Outcome::Execute(queued)) => execute(queued, store).await,
-        None => dispatch(&command, store).await,
+        Some(Outcome::Execute(queued)) => execute(queued, store, transaction).await,
+        None => dispatch(&command, store, transaction).await,
     }
 }
 
@@ -49,27 +49,30 @@ pub async fn run(command: Value, store: &Store, transaction: &mut Transaction) -
 /// The commands that steer a transaction are never queued, so nothing here can
 /// open or execute another one: this runs one layer below `run` rather than
 /// back through it.
-async fn execute(queued: Vec<Command>, store: &Store) -> Value {
+async fn execute(queued: Vec<Command>, store: &Store, transaction: &mut Transaction) -> Value {
     let mut replies = Vec::with_capacity(queued.len());
 
     for command in &queued {
-        replies.push(dispatch(command, store).await);
+        replies.push(dispatch(command, store, transaction).await);
     }
 
     Value::Array(replies)
 }
 
-/// Runs one command against the store.
+/// Runs one command, against the store or against the connection's own state.
 ///
 /// Each module below claims the commands it knows and returns `None` for the
 /// rest, so adding a command means touching only the module it belongs to.
-async fn dispatch(command: &Command, store: &Store) -> Value {
+async fn dispatch(command: &Command, store: &Store, transaction: &mut Transaction) -> Value {
     let Command {
         uppercased,
         name,
         args,
     } = command;
 
+    if let Some(reply) = transactions::run(uppercased, args, transaction) {
+        return reply;
+    }
     if let Some(reply) = strings::run(uppercased, args, store) {
         return reply;
     }
