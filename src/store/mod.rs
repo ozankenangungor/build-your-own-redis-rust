@@ -70,14 +70,22 @@ impl Store {
         }
     }
 
-    /// The version `key` holds now, for a client that wants to be told should
-    /// it change. `None` means there is no such key, which is a state of its
-    /// own: a key that appears later has changed just as surely as one rewritten.
-    pub fn version(&self, key: &Bytes) -> Option<u64> {
+    /// The versions these keys hold now, for a client that wants to be told
+    /// should any of them change. `None` means there is no such key, which is a
+    /// state of its own: a key that appears later has changed just as surely as
+    /// one rewritten.
+    ///
+    /// They are read together under one lock, so what comes back is one moment
+    /// rather than several, just as [`Store::unchanged`] checks one moment.
+    pub fn versions(&self, keys: &[Bytes]) -> Vec<Option<u64>> {
         let mut state = self.state();
-        drop_if_expired(&mut state.entries, key);
 
-        state.entries.get(key).map(|entry| entry.version)
+        keys.iter()
+            .map(|key| {
+                drop_if_expired(&mut state.entries, key);
+                state.entries.get(key).map(|entry| entry.version)
+            })
+            .collect()
     }
 
     /// Whether every one of these keys still holds the version it did when it

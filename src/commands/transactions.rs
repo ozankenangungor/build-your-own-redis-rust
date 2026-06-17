@@ -86,13 +86,10 @@ pub fn steer(command: &Command, transaction: &mut Transaction, store: &Store) ->
             // client has no way left to act on.
             _ if transaction.queued.is_some() => watch_inside_multi(),
             keys => {
-                for key in keys {
+                for (key, version) in keys.iter().zip(store.versions(keys)) {
                     // Watching a key a second time keeps the first reading, so
                     // that a change already missed is not forgotten.
-                    transaction
-                        .watched
-                        .entry(key.clone())
-                        .or_insert_with(|| store.version(key));
+                    transaction.watched.entry(key.clone()).or_insert(version);
                 }
 
                 Value::SimpleString("OK".into())
