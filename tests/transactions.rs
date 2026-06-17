@@ -1369,3 +1369,91 @@ fn stops_watching_after_an_empty_transaction() {
     client.send(&["EXEC"]);
     client.expect_reply("*1\r\n+PONG\r\n");
 }
+
+#[test]
+fn stops_watching_on_discard() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["SET", "foo", "100"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "200"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WATCH", "foo", "bar"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "300"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    meddler.send(&["SET", "foo", "400"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["DISCARD"]);
+    client.expect_reply("+OK\r\n");
+
+    // The change to `foo` belonged to the transaction that was thrown away,
+    // and has nothing to say about this one.
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "300"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+OK\r\n");
+
+    meddler.send(&["GET", "bar"]);
+    meddler.expect_reply("$3\r\n300\r\n");
+}
+
+#[test]
+fn stops_watching_on_a_discard_of_an_empty_transaction() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["DISCARD"]);
+    client.expect_reply("+OK\r\n");
+
+    meddler.send(&["SET", "key", "changed"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+    client.send(&["EXEC"]);
+    client.expect_reply("*1\r\n+PONG\r\n");
+}
+
+#[test]
+fn keeps_watching_after_a_discard_that_was_turned_down() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut meddler = server.connect();
+
+    client.send(&["WATCH", "key"]);
+    client.expect_reply("+OK\r\n");
+
+    // There is no transaction to throw away, so nothing is thrown away.
+    client.send(&["DISCARD"]);
+    client.expect_reply("-ERR DISCARD without MULTI\r\n");
+
+    meddler.send(&["SET", "key", "changed"]);
+    meddler.expect_reply("+OK\r\n");
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+QUEUED\r\n");
+    client.send(&["EXEC"]);
+    client.expect_reply("*-1\r\n");
+}

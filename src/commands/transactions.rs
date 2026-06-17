@@ -99,10 +99,15 @@ pub fn steer(command: &Command, transaction: &mut Transaction, store: &Store) ->
             }
         },
         "DISCARD" => match command.args.as_slice() {
-            // Dropping the queue is the whole of it: none of those commands
-            // ever reached the store.
+            // None of the queued commands ever reached the store, so dropping
+            // them is all the undoing there is to do.
             [] => match transaction.queued.take() {
-                Some(_) => Value::SimpleString("OK".into()),
+                Some(_) => {
+                    // The watches were taken out for the transaction being
+                    // thrown away, and go with it, exactly as at `EXEC`.
+                    transaction.watched.clear();
+                    Value::SimpleString("OK".into())
+                }
                 None => discard_without_multi(),
             },
             _ => wrong_arity("discard"),
