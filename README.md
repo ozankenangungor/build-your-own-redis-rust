@@ -8,8 +8,9 @@ library can talk to it.
 ## Running it
 
 ```sh
-cargo run          # listens on 127.0.0.1:6379
-redis-cli PING     # from another terminal
+cargo run                    # listens on 127.0.0.1:6379
+cargo run -- --port 6380     # or wherever you like
+redis-cli PING               # from another terminal
 ```
 
 ## What it supports
@@ -44,6 +45,7 @@ Beyond the individual commands, the server:
 ```
 src/
   main.rs         binds the port and accepts connections
+  config.rs       the settings the server was started with
   connection.rs   reads commands from one client and writes the replies
   resp.rs         the Redis serialization protocol: parsing and encoding
   commands/       one module per command family, plus the dispatcher

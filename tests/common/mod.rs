@@ -1,61 +1,46 @@
 // Each test binary uses its own subset of these helpers.
 #![allow(dead_code)]
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
-
-const ADDR: &str = "127.0.0.1:6379";
-
-/// The server always binds the same port, so only one may run at a time.
-static PORT: Mutex<()> = Mutex::new(());
+use std::time::Duration;
 
 /// A running instance of the server, killed when it goes out of scope.
 pub struct Server {
     process: Child,
-    /// Held for as long as the server runs, to keep the port exclusive.
-    _port: MutexGuard<'static, ()>,
+    /// This server's own port, so that tests never talk to one another's.
+    addr: String,
 }
 
 impl Server {
-    /// Starts the server and waits until it accepts connections.
+    /// Starts the server on a port of its own and waits until it is listening.
+    ///
+    /// The port is left to the operating system and read back from the server,
+    /// rather than picked here: a port found free a moment ago may have been
+    /// taken by the time the server reaches for it.
     pub fn start() -> Self {
-        let port = PORT.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Without this, a server left running from elsewhere would answer every
-        // connection below and the tests would report on a stranger's replies.
-        assert!(
-            TcpStream::connect(ADDR).is_err(),
-            "something is already listening on {ADDR}",
-        );
-
-        let process = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"))
+        let mut process = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"))
+            .args(["--port", "0"])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("failed to spawn server");
 
-        // Reaped by `Drop` on every path, including the panic below.
-        let server = Self {
+        let logs = process.stderr.take().expect("server stderr was piped");
+
+        // Reaped by `Drop` on every path, including a panic in `port_from`.
+        let mut server = Self {
             process,
-            _port: port,
+            addr: String::new(),
         };
+        server.addr = format!("127.0.0.1:{}", port_from(logs));
 
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if TcpStream::connect(ADDR).is_ok() {
-                return server;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        panic!("server did not start listening on {ADDR}");
+        server
     }
 
     pub fn connect(&self) -> Client {
-        let stream = TcpStream::connect(ADDR).expect("failed to connect to server");
+        let stream = TcpStream::connect(&self.addr).expect("failed to connect to server");
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("failed to set read timeout");
@@ -68,6 +53,30 @@ impl Drop for Server {
         let _ = self.process.kill();
         let _ = self.process.wait();
     }
+}
+
+/// Reads the port the server announces once it is listening, then leaves a
+/// thread to swallow the rest of its logs so that a full pipe can never bring
+/// the server to a halt.
+fn port_from(logs: impl Read + Send + 'static) -> u16 {
+    let mut logs = BufReader::new(logs);
+    let mut line = String::new();
+
+    let port = loop {
+        line.clear();
+        let read = logs
+            .read_line(&mut line)
+            .expect("failed to read server logs");
+        assert!(read > 0, "server stopped before it started listening");
+
+        if let Some(port) = line.trim().strip_prefix("listening on port ") {
+            break port.parse().expect("a port is a number");
+        }
+    };
+
+    std::thread::spawn(move || std::io::copy(&mut logs, &mut std::io::sink()));
+
+    port
 }
 
 /// A client connection used to send commands and assert on the replies.

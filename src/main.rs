@@ -1,16 +1,24 @@
 mod commands;
+mod config;
 mod connection;
 mod resp;
 mod store;
 
 use anyhow::Result;
+use config::Config;
 use store::Store;
 use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:6379").await?;
+    let config = Config::from_args()?;
+
+    let listener = TcpListener::bind(("127.0.0.1", config.port)).await?;
     let store = Store::default();
+
+    // Port zero leaves the choice to the operating system, so report the port
+    // that was settled on rather than the one that was asked for.
+    eprintln!("listening on port {}", listener.local_addr()?.port());
 
     loop {
         // One failed accept, say because the process is out of file
