@@ -22,13 +22,13 @@ async fn main() -> Result<()> {
                 continue;
             }
         };
-        println!("accepted new connection from {addr}");
+        eprintln!("accepted a connection from {addr}");
 
         // Each connection gets its own task, so a slow client cannot keep the
         // server from accepting the next one. Cloning the store shares it.
         let store = store.clone();
         tokio::spawn(async move {
-            if let Err(e) = connection::serve(stream, store).await {
+            if let Err(e) = connection::serve(stream, addr, store).await {
                 eprintln!("connection error: {e}");
             }
         });

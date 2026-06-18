@@ -4,11 +4,12 @@ use crate::store::Store;
 use crate::{commands, resp};
 use anyhow::Result;
 use bytes::{Buf, BytesMut};
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Reads commands from one client until it goes away, replying to each.
-pub async fn serve(mut stream: TcpStream, store: Store) -> Result<()> {
+pub async fn serve(mut stream: TcpStream, addr: SocketAddr, store: Store) -> Result<()> {
     let mut buf = BytesMut::with_capacity(1024);
     // The transaction lives as long as this connection and no longer, so a
     // client that hangs up mid-transaction leaves nothing behind.
@@ -16,7 +17,7 @@ pub async fn serve(mut stream: TcpStream, store: Store) -> Result<()> {
 
     loop {
         if stream.read_buf(&mut buf).await? == 0 {
-            println!("connection closed by client");
+            eprintln!("{addr} closed the connection");
             return Ok(());
         }
 
