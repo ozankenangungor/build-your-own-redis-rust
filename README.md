@@ -22,6 +22,7 @@ redis-cli PING               # from another terminal
 | Lists | `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP` |
 | Streams | `XADD`, `XRANGE`, `XREAD` (with `BLOCK` and `$`) |
 | Keys | `TYPE` |
+| Server | `INFO` (the `replication` section) |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` |
 
 Beyond the individual commands, the server:

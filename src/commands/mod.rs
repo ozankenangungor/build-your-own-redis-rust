@@ -1,5 +1,6 @@
 mod keys;
 mod lists;
+mod server;
 mod streams;
 mod strings;
 mod transactions;
@@ -83,6 +84,9 @@ async fn dispatch(command: &Command, store: &Store, transaction: &mut Transactio
         return reply;
     }
     if let Some(reply) = keys::run(uppercased, args, store) {
+        return reply;
+    }
+    if let Some(reply) = server::run(uppercased, args) {
         return reply;
     }
 
