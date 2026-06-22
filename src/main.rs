@@ -2,19 +2,21 @@ mod commands;
 mod config;
 mod connection;
 mod resp;
+mod server;
 mod store;
 
 use anyhow::Result;
 use config::Config;
+use server::Server;
 use std::sync::Arc;
 use store::Store;
 use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Arc::new(Config::from_args()?);
+    let server = Arc::new(Server::new(Config::from_args()?));
 
-    let listener = TcpListener::bind(("127.0.0.1", config.port)).await?;
+    let listener = TcpListener::bind(("127.0.0.1", server.config.port)).await?;
     let store = Store::default();
 
     // Port zero leaves the choice to the operating system, so report the port
@@ -37,9 +39,9 @@ async fn main() -> Result<()> {
         // server from accepting the next one. Cloning shares the one store and
         // the one set of settings rather than copying them.
         let store = store.clone();
-        let config = Arc::clone(&config);
+        let server = Arc::clone(&server);
         tokio::spawn(async move {
-            if let Err(e) = connection::serve(stream, addr, store, &config).await {
+            if let Err(e) = connection::serve(stream, addr, store, &server).await {
                 eprintln!("connection error: {e}");
             }
         });

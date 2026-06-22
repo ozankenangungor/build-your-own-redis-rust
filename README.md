@@ -48,6 +48,7 @@ Beyond the individual commands, the server:
 src/
   main.rs         binds the port and accepts connections
   config.rs       the settings the server was started with
+  server.rs       what this server is: its settings and replication id
   connection.rs   reads commands from one client and writes the replies
   resp.rs         the Redis serialization protocol: parsing and encoding
   commands/       one module per command family, plus the dispatcher

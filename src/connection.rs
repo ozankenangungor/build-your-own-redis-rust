@@ -1,6 +1,6 @@
 use crate::commands::Transaction;
-use crate::config::Config;
 use crate::resp::Value;
+use crate::server::Server;
 use crate::store::Store;
 use crate::{commands, resp};
 use anyhow::Result;
@@ -14,7 +14,7 @@ pub async fn serve(
     mut stream: TcpStream,
     addr: SocketAddr,
     store: Store,
-    config: &Config,
+    server: &Server,
 ) -> Result<()> {
     let mut buf = BytesMut::with_capacity(1024);
     // The transaction lives as long as this connection and no longer, so a
@@ -33,7 +33,7 @@ pub async fn serve(
                 Ok(None) => break,
                 Ok(Some((command, consumed))) => {
                     buf.advance(consumed);
-                    commands::run(command, &store, &mut transaction, config).await
+                    commands::run(command, &store, &mut transaction, server).await
                 }
                 // Malformed input leaves the stream out of step, with no way to
                 // tell where the next command starts, so say so and hang up.

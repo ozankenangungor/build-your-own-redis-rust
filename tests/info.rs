@@ -140,3 +140,65 @@ fn stays_a_master_when_told_nothing() {
         "no role in {report:?}",
     );
 }
+
+#[test]
+fn reports_the_replication_id_it_started_with() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["INFO", "replication"]);
+    let report = client.read_bulk_string();
+
+    let id = report
+        .lines()
+        .find_map(|line| line.strip_prefix("master_replid:"))
+        .unwrap_or_else(|| panic!("no replication id in {report:?}"));
+
+    assert_eq!(id.len(), 40, "{id:?}");
+    assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{id:?}");
+}
+
+#[test]
+fn reports_an_offset_of_nothing_handed_out_yet() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["INFO", "replication"]);
+    let report = client.read_bulk_string();
+
+    assert!(
+        report.lines().any(|line| line == "master_repl_offset:0"),
+        "no offset in {report:?}",
+    );
+}
+
+#[test]
+fn keeps_the_same_replication_id_for_as_long_as_it_runs() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut other = server.connect();
+
+    client.send(&["INFO", "replication"]);
+    let first = client.read_bulk_string();
+
+    other.send(&["INFO", "replication"]);
+    let second = other.read_bulk_string();
+
+    assert_eq!(first, second);
+}
+
+#[test]
+fn gives_each_server_a_replication_id_of_its_own() {
+    let one = Server::start();
+    let other = Server::start();
+
+    let mut client = one.connect();
+    client.send(&["INFO", "replication"]);
+    let first = client.read_bulk_string();
+
+    let mut client = other.connect();
+    client.send(&["INFO", "replication"]);
+    let second = client.read_bulk_string();
+
+    assert_ne!(first, second, "two servers share a replication id");
+}

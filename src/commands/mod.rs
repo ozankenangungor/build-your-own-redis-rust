@@ -1,14 +1,14 @@
+mod info;
 mod keys;
 mod lists;
-mod server;
 mod streams;
 mod strings;
 mod transactions;
 
 pub use transactions::Transaction;
 
-use crate::config::Config;
 use crate::resp::Value;
+use crate::server::Server;
 use crate::store::Store;
 use bytes::Bytes;
 use transactions::Outcome;
@@ -27,7 +27,7 @@ pub async fn run(
     command: Value,
     store: &Store,
     transaction: &mut Transaction,
-    config: &Config,
+    server: &Server,
 ) -> Value {
     let command = match Command::parse(command) {
         Ok(command) => command,
@@ -45,8 +45,8 @@ pub async fn run(
 
     match transactions::steer(&command, transaction, store) {
         Some(Outcome::Reply(reply)) => reply,
-        Some(Outcome::Execute(queued)) => execute(queued, store, transaction, config).await,
-        None => dispatch(&command, store, transaction, config).await,
+        Some(Outcome::Execute(queued)) => execute(queued, store, transaction, server).await,
+        None => dispatch(&command, store, transaction, server).await,
     }
 }
 
@@ -60,12 +60,12 @@ async fn execute(
     queued: Vec<Command>,
     store: &Store,
     transaction: &mut Transaction,
-    config: &Config,
+    server: &Server,
 ) -> Value {
     let mut replies = Vec::with_capacity(queued.len());
 
     for command in &queued {
-        replies.push(dispatch(command, store, transaction, config).await);
+        replies.push(dispatch(command, store, transaction, server).await);
     }
 
     Value::Array(replies)
@@ -79,7 +79,7 @@ async fn dispatch(
     command: &Command,
     store: &Store,
     transaction: &mut Transaction,
-    config: &Config,
+    server: &Server,
 ) -> Value {
     let Command {
         uppercased,
@@ -102,7 +102,7 @@ async fn dispatch(
     if let Some(reply) = keys::run(uppercased, args, store) {
         return reply;
     }
-    if let Some(reply) = server::run(uppercased, args, config) {
+    if let Some(reply) = info::run(uppercased, args, server) {
         return reply;
     }
 
