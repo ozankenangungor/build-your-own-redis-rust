@@ -4,13 +4,26 @@ use anyhow::{Result, bail};
 const DEFAULT_PORT: u16 = 6379;
 
 /// How the server was asked to run.
+#[derive(Debug, PartialEq)]
 pub struct Config {
+    pub port: u16,
+    /// The master this server was told to follow, if it is a replica.
+    pub replicaof: Option<Master>,
+}
+
+/// Where to find the master a replica follows.
+#[derive(Debug, PartialEq)]
+pub struct Master {
+    pub host: String,
     pub port: u16,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { port: DEFAULT_PORT }
+        Self {
+            port: DEFAULT_PORT,
+            replicaof: None,
+        }
     }
 }
 
@@ -38,11 +51,29 @@ impl Config {
 
             match name {
                 "port" => config.port = value.parse()?,
+                "replicaof" => config.replicaof = Some(Master::parse(&value)?),
                 _ => bail!("unknown flag '{flag}'"),
             }
         }
 
         Ok(config)
+    }
+}
+
+impl Master {
+    /// Redis takes both halves of the master's address as one argument, as in
+    /// `--replicaof "localhost 6379"`.
+    fn parse(value: &str) -> Result<Self> {
+        let mut parts = value.split_whitespace();
+
+        let (Some(host), Some(port), None) = (parts.next(), parts.next(), parts.next()) else {
+            bail!("expected a host and a port, found '{value}'");
+        };
+
+        Ok(Self {
+            host: host.to_string(),
+            port: port.parse()?,
+        })
     }
 }
 
@@ -70,6 +101,39 @@ mod tests {
             parse(&["--port", "6380", "--port", "6381"]).unwrap().port,
             6381
         );
+    }
+
+    #[test]
+    fn follows_no_master_unless_told_to() {
+        assert_eq!(parse(&[]).unwrap().replicaof, None);
+    }
+
+    #[test]
+    fn takes_the_master_to_follow_as_one_argument() {
+        let config = parse(&["--replicaof", "localhost 6379"]).unwrap();
+
+        assert_eq!(
+            config.replicaof,
+            Some(Master {
+                host: "localhost".to_string(),
+                port: 6379,
+            })
+        );
+    }
+
+    #[test]
+    fn takes_the_master_alongside_the_port_to_listen_on() {
+        let config = parse(&["--port", "6380", "--replicaof", "127.0.0.1 6379"]).unwrap();
+
+        assert_eq!(config.port, 6380);
+        assert_eq!(config.replicaof.unwrap().port, 6379);
+    }
+
+    #[test]
+    fn refuses_a_master_it_cannot_make_sense_of() {
+        for value in ["localhost", "localhost 6379 extra", "", "localhost http"] {
+            assert!(parse(&["--replicaof", value]).is_err(), "{value:?}");
+        }
     }
 
     #[test]

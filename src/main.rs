@@ -6,12 +6,13 @@ mod store;
 
 use anyhow::Result;
 use config::Config;
+use std::sync::Arc;
 use store::Store;
 use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = Config::from_args()?;
+    let config = Arc::new(Config::from_args()?);
 
     let listener = TcpListener::bind(("127.0.0.1", config.port)).await?;
     let store = Store::default();
@@ -33,10 +34,12 @@ async fn main() -> Result<()> {
         eprintln!("accepted a connection from {addr}");
 
         // Each connection gets its own task, so a slow client cannot keep the
-        // server from accepting the next one. Cloning the store shares it.
+        // server from accepting the next one. Cloning shares the one store and
+        // the one set of settings rather than copying them.
         let store = store.clone();
+        let config = Arc::clone(&config);
         tokio::spawn(async move {
-            if let Err(e) = connection::serve(stream, addr, store).await {
+            if let Err(e) = connection::serve(stream, addr, store, &config).await {
                 eprintln!("connection error: {e}");
             }
         });

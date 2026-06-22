@@ -20,8 +20,14 @@ impl Server {
     /// rather than picked here: a port found free a moment ago may have been
     /// taken by the time the server reaches for it.
     pub fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    /// The same, for a server that needs telling something on top of its port.
+    pub fn start_with(args: &[&str]) -> Self {
         let mut process = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"))
             .args(["--port", "0"])
+            .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()

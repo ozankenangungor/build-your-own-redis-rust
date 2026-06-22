@@ -10,6 +10,7 @@ library can talk to it.
 ```sh
 cargo run                    # listens on 127.0.0.1:6379
 cargo run -- --port 6380     # or wherever you like
+cargo run -- --replicaof "localhost 6379"   # as a replica of another server
 redis-cli PING               # from another terminal
 ```
 

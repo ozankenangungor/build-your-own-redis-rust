@@ -1,4 +1,5 @@
 use crate::commands::Transaction;
+use crate::config::Config;
 use crate::resp::Value;
 use crate::store::Store;
 use crate::{commands, resp};
@@ -9,7 +10,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Reads commands from one client until it goes away, replying to each.
-pub async fn serve(mut stream: TcpStream, addr: SocketAddr, store: Store) -> Result<()> {
+pub async fn serve(
+    mut stream: TcpStream,
+    addr: SocketAddr,
+    store: Store,
+    config: &Config,
+) -> Result<()> {
     let mut buf = BytesMut::with_capacity(1024);
     // The transaction lives as long as this connection and no longer, so a
     // client that hangs up mid-transaction leaves nothing behind.
@@ -27,7 +33,7 @@ pub async fn serve(mut stream: TcpStream, addr: SocketAddr, store: Store) -> Res
                 Ok(None) => break,
                 Ok(Some((command, consumed))) => {
                     buf.advance(consumed);
-                    commands::run(command, &store, &mut transaction).await
+                    commands::run(command, &store, &mut transaction, config).await
                 }
                 // Malformed input leaves the stream out of step, with no way to
                 // tell where the next command starts, so say so and hang up.

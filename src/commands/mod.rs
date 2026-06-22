@@ -7,6 +7,7 @@ mod transactions;
 
 pub use transactions::Transaction;
 
+use crate::config::Config;
 use crate::resp::Value;
 use crate::store::Store;
 use bytes::Bytes;
@@ -22,7 +23,12 @@ struct Command {
 }
 
 /// Runs one client command and produces the reply to send back.
-pub async fn run(command: Value, store: &Store, transaction: &mut Transaction) -> Value {
+pub async fn run(
+    command: Value,
+    store: &Store,
+    transaction: &mut Transaction,
+    config: &Config,
+) -> Value {
     let command = match Command::parse(command) {
         Ok(command) => command,
         Err(reply) => return reply,
@@ -39,8 +45,8 @@ pub async fn run(command: Value, store: &Store, transaction: &mut Transaction) -
 
     match transactions::steer(&command, transaction, store) {
         Some(Outcome::Reply(reply)) => reply,
-        Some(Outcome::Execute(queued)) => execute(queued, store, transaction).await,
-        None => dispatch(&command, store, transaction).await,
+        Some(Outcome::Execute(queued)) => execute(queued, store, transaction, config).await,
+        None => dispatch(&command, store, transaction, config).await,
     }
 }
 
@@ -50,11 +56,16 @@ pub async fn run(command: Value, store: &Store, transaction: &mut Transaction) -
 /// The commands that steer a transaction are never queued, so nothing here can
 /// open or execute another one: this runs one layer below `run` rather than
 /// back through it.
-async fn execute(queued: Vec<Command>, store: &Store, transaction: &mut Transaction) -> Value {
+async fn execute(
+    queued: Vec<Command>,
+    store: &Store,
+    transaction: &mut Transaction,
+    config: &Config,
+) -> Value {
     let mut replies = Vec::with_capacity(queued.len());
 
     for command in &queued {
-        replies.push(dispatch(command, store, transaction).await);
+        replies.push(dispatch(command, store, transaction, config).await);
     }
 
     Value::Array(replies)
@@ -64,7 +75,12 @@ async fn execute(queued: Vec<Command>, store: &Store, transaction: &mut Transact
 ///
 /// Each module below claims the commands it knows and returns `None` for the
 /// rest, so adding a command means touching only the module it belongs to.
-async fn dispatch(command: &Command, store: &Store, transaction: &mut Transaction) -> Value {
+async fn dispatch(
+    command: &Command,
+    store: &Store,
+    transaction: &mut Transaction,
+    config: &Config,
+) -> Value {
     let Command {
         uppercased,
         name,
@@ -86,7 +102,7 @@ async fn dispatch(command: &Command, store: &Store, transaction: &mut Transactio
     if let Some(reply) = keys::run(uppercased, args, store) {
         return reply;
     }
-    if let Some(reply) = server::run(uppercased, args) {
+    if let Some(reply) = server::run(uppercased, args, config) {
         return reply;
     }
 

@@ -99,3 +99,44 @@ fn keeps_serving_the_connection_after_an_info() {
     client.send(&["PING"]);
     client.expect_reply("+PONG\r\n");
 }
+
+#[test]
+fn reports_that_it_is_a_replica_when_told_to_follow_a_master() {
+    let server = Server::start_with(&["--replicaof", "localhost 6379"]);
+    let mut client = server.connect();
+
+    client.send(&["INFO", "replication"]);
+    let report = client.read_bulk_string();
+
+    // Redis calls a replica a slave in everything it reports.
+    assert!(
+        report.lines().any(|line| line == "role:slave"),
+        "no role in {report:?}",
+    );
+}
+
+#[test]
+fn serves_clients_of_its_own_while_following_a_master() {
+    let server = Server::start_with(&["--replicaof", "localhost 6379"]);
+    let mut client = server.connect();
+
+    // Nothing about being a replica keeps it from answering on its own port.
+    client.send(&["SET", "key", "value"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["GET", "key"]);
+    client.expect_reply("$5\r\nvalue\r\n");
+}
+
+#[test]
+fn stays_a_master_when_told_nothing() {
+    let server = Server::start_with(&[]);
+    let mut client = server.connect();
+
+    client.send(&["INFO", "replication"]);
+    let report = client.read_bulk_string();
+
+    assert!(
+        report.lines().any(|line| line == "role:master"),
+        "no role in {report:?}",
+    );
+}
