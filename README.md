@@ -7,6 +7,10 @@ A Redis server built from scratch on top of Tokio, following the
 No Redis library of any kind: the wire protocol, RDB parsing, AOF engine,
 replication handshake, and geospatial indexing are all implemented from scratch.
 
+<p align=center>
+  <img src="docs/demo.gif" alt="Starting the server, then asking it for strings, sorted sets and distances with redis-cli, and finding it all still there after a restart" width="100%">
+</p>
+
 ## Quick Start
 
 ```sh
