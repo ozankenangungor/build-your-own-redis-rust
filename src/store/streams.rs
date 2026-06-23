@@ -38,6 +38,7 @@ impl fmt::Display for EntryId {
 }
 
 /// The id an `XADD` asked for, which may leave part of it to the server.
+#[derive(Clone, Copy)]
 pub enum RequestedId {
     Explicit(EntryId),
     /// The timestamp is given and the sequence number is ours to pick.

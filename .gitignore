@@ -8,3 +8,7 @@ target/
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+
+# What a server leaves behind when it is run from here
+appendonlydir/
+*.rdb

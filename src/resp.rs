@@ -5,6 +5,14 @@ use std::io::Write;
 /// The largest bulk string Redis accepts, and so the largest we do.
 const MAX_BULK_LENGTH: usize = 512 * 1024 * 1024;
 
+/// How deeply values may nest before the input is taken as nonsense.
+///
+/// A command is a flat array of bulk strings, and nothing a server says back
+/// nests more than one deep, so this is far more room than anything real needs.
+/// Without a limit, a few bytes of nothing but array headers would take the
+/// whole server down with the stack it recursed through.
+const MAX_DEPTH: usize = 8;
+
 /// A value in the Redis serialization protocol.
 ///
 /// Bulk strings carry raw bytes, because Redis keys and values are binary safe:
@@ -21,6 +29,13 @@ pub enum Value {
     Null,
     /// The null array, which is what a blocking command replies on a timeout.
     NullArray,
+    /// A file, laid out like a bulk string but with no CRLF after it: what
+    /// follows a file is not another value. This is how a master hands a
+    /// replica the whole of its dataset.
+    File(Bytes),
+    /// Values written one after another, for the answers that are more than one
+    /// value. Only ever written, never read.
+    Sequence(Vec<Value>),
 }
 
 impl Value {
@@ -49,6 +64,15 @@ impl Value {
             }
             Value::Null => out.extend_from_slice(b"$-1\r\n"),
             Value::NullArray => out.extend_from_slice(b"*-1\r\n"),
+            Value::File(bytes) => {
+                write!(out, "${}\r\n", bytes.len()).unwrap();
+                out.extend_from_slice(bytes);
+            }
+            Value::Sequence(values) => {
+                for value in values {
+                    value.encode_into(out);
+                }
+            }
         }
     }
 }
@@ -58,7 +82,7 @@ impl Value {
 /// value and the caller should read more before trying again.
 pub fn parse(input: &[u8]) -> Result<Option<(Value, usize)>> {
     let mut parser = Parser { input, pos: 0 };
-    Ok(parser.value()?.map(|value| (value, parser.pos)))
+    Ok(parser.value(0)?.map(|value| (value, parser.pos)))
 }
 
 struct Parser<'a> {
@@ -75,7 +99,10 @@ impl<'a> Parser<'a> {
         Some(&rest[..end])
     }
 
-    fn value(&mut self) -> Result<Option<Value>> {
+    /// Reads one value. `depth` is how many arrays it is nested inside, which
+    /// is carried along rather than kept, so that each branch counts only the
+    /// arrays it is actually inside.
+    fn value(&mut self, depth: usize) -> Result<Option<Value>> {
         let Some(line) = self.line() else {
             return Ok(None);
         };
@@ -88,7 +115,7 @@ impl<'a> Parser<'a> {
             b'-' => Ok(Some(Value::Error(text(payload)?.to_string()))),
             b':' => Ok(Some(Value::Integer(text(payload)?.parse()?))),
             b'$' => self.bulk_string(payload),
-            b'*' => self.array(payload),
+            b'*' => self.array(payload, depth),
             _ => bail!("unknown type byte '{}'", kind as char),
         }
     }
@@ -112,12 +139,16 @@ impl<'a> Parser<'a> {
         ))))
     }
 
-    fn array(&mut self, payload: &[u8]) -> Result<Option<Value>> {
+    fn array(&mut self, payload: &[u8], depth: usize) -> Result<Option<Value>> {
+        if depth >= MAX_DEPTH {
+            bail!("values nested too deeply");
+        }
+
         let len: usize = text(payload)?.parse()?;
 
         let mut values = Vec::new();
         for _ in 0..len {
-            let Some(value) = self.value()? else {
+            let Some(value) = self.value(depth + 1)? else {
                 return Ok(None);
             };
             values.push(value);
@@ -174,6 +205,24 @@ mod tests {
     }
 
     #[test]
+    fn refuses_values_nested_deeper_than_anything_real() {
+        // Nothing but array headers: a few bytes each, and every one of them a
+        // step further down the stack were they all followed.
+        let input = b"*1\r\n".repeat(1000);
+
+        assert!(parse(&input).is_err());
+    }
+
+    #[test]
+    fn parses_the_nesting_that_does_come_up() {
+        // What `XREAD` answers with is as deep as anything Redis sends.
+        let input =
+            b"*1\r\n*2\r\n$6\r\nstream\r\n*1\r\n*2\r\n$3\r\n1-1\r\n*2\r\n$1\r\na\r\n$1\r\nb\r\n";
+
+        assert!(parse(input).unwrap().is_some());
+    }
+
+    #[test]
     fn refuses_a_bulk_length_it_could_never_hold() {
         // Taken at face value, this length would overflow the arithmetic that
         // looks for the end of the string.
@@ -186,6 +235,23 @@ mod tests {
         let expected = Value::Array(vec![Value::BulkString(Bytes::from_static(b"\xff\x00\xfe"))]);
 
         assert_eq!(parse(input).unwrap(), Some((expected, input.len())));
+    }
+
+    #[test]
+    fn encodes_a_file_without_the_crlf_a_bulk_string_ends_in() {
+        let value = Value::File(Bytes::from_static(b"\x00\x01"));
+
+        assert_eq!(value.encode(), b"$2\r\n\x00\x01");
+    }
+
+    #[test]
+    fn encodes_a_sequence_as_one_value_after_another() {
+        let value = Value::Sequence(vec![
+            Value::SimpleString("FIRST".into()),
+            Value::SimpleString("SECOND".into()),
+        ]);
+
+        assert_eq!(value.encode(), b"+FIRST\r\n+SECOND\r\n");
     }
 
     #[test]

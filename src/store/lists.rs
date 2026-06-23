@@ -1,9 +1,10 @@
-use super::{Data, Entries, Entry, State, Store, WrongType, drop_if_expired};
+use super::{Data, Entries, Entry, State, Store, WrongType, drop_if_expired, resolve_index};
 use bytes::Bytes;
 use std::collections::VecDeque;
 use tokio::sync::oneshot;
 
 /// The end of a list a command works from.
+#[derive(Clone, Copy)]
 pub enum Side {
     Left,
     Right,
@@ -214,16 +215,5 @@ fn push_first(entries: &mut Entries, key: &Bytes, element: Bytes, version: u64) 
     if let Data::List(list) = &mut entry.data {
         list.push_front(element);
         entry.version = version;
-    }
-}
-
-/// Turns a list index into an offset from the start. Negative indexes count
-/// back from the end, and one reaching past the start clamps to the first
-/// element rather than wrapping around.
-fn resolve_index(index: i64, len: usize) -> usize {
-    if index >= 0 {
-        index as usize
-    } else {
-        len.saturating_sub(index.unsigned_abs() as usize)
     }
 }

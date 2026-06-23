@@ -1,4 +1,10 @@
+use crate::aof::Aof;
+use crate::channels::Channels;
 use crate::config::Config;
+use crate::replicas::Replicas;
+use crate::users::Users;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How long a replication id is, in hexadecimal characters.
@@ -9,6 +15,22 @@ const ID_LENGTH: usize = 40;
 pub struct Server {
     pub config: Config,
     pub replication: Replication,
+    /// The replicas following this server, each waiting to be told what has
+    /// changed.
+    pub replicas: Replicas,
+    /// Who is listening on what, so that a publisher can be told how far its
+    /// message reached.
+    pub channels: Channels,
+    /// Where the writes are recorded as they happen, for a server keeping such
+    /// a record. Empty is a server that keeps none.
+    ///
+    /// It is taken up after the record has been played back, and not before: a
+    /// command read out of the file has no business being written straight back
+    /// into it.
+    pub aof: OnceLock<Aof>,
+    /// The passwords a client may be let in with. Every connection asks the
+    /// same set, so a password given on one is a password given on all.
+    pub users: Users,
 }
 
 /// A server's place in the history of a dataset.
@@ -17,8 +39,21 @@ pub struct Replication {
     /// time it starts, which is how a replica tells the history it was
     /// following from the one it finds after a restart.
     pub id: String,
-    /// How many bytes of commands have been handed to replicas so far.
-    pub offset: u64,
+    /// How many bytes of commands have been handed to replicas so far. Every
+    /// connection that passes a command on adds to it, so it is shared.
+    offset: AtomicU64,
+}
+
+impl Replication {
+    /// How far along this server's history is.
+    pub fn offset(&self) -> u64 {
+        self.offset.load(Ordering::Relaxed)
+    }
+
+    /// Counts more of the history as handed out.
+    pub fn advance(&self, bytes: u64) {
+        self.offset.fetch_add(bytes, Ordering::Relaxed);
+    }
 }
 
 impl Server {
@@ -27,8 +62,12 @@ impl Server {
             config,
             replication: Replication {
                 id: new_id(),
-                offset: 0,
+                offset: AtomicU64::new(0),
             },
+            replicas: Replicas::default(),
+            channels: Channels::default(),
+            aof: OnceLock::new(),
+            users: Users::default(),
         }
     }
 }
@@ -87,6 +126,16 @@ mod tests {
 
     #[test]
     fn starts_a_master_at_the_beginning_of_its_history() {
-        assert_eq!(Server::new(Config::default()).replication.offset, 0);
+        assert_eq!(Server::new(Config::default()).replication.offset(), 0);
+    }
+
+    #[test]
+    fn counts_the_history_it_hands_out() {
+        let server = Server::new(Config::default());
+
+        server.replication.advance(29);
+        server.replication.advance(14);
+
+        assert_eq!(server.replication.offset(), 43);
     }
 }

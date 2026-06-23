@@ -1,4 +1,5 @@
 mod lists;
+mod sorted_sets;
 mod streams;
 mod strings;
 
@@ -20,14 +21,17 @@ use tokio::sync::{Notify, oneshot};
 pub struct Store(Arc<Mutex<State>>);
 
 /// Returned when a command is used on a key holding another type of value.
+#[derive(Debug, PartialEq)]
 pub struct WrongType;
 
 /// The kind of value a key holds, or `None` when there is no such key.
+#[derive(Clone, Copy)]
 pub enum Kind {
     None,
     String,
     List,
     Stream,
+    SortedSet,
 }
 
 #[derive(Default)]
@@ -67,7 +71,28 @@ impl Store {
                 data: Data::Stream(_),
                 ..
             }) => Kind::Stream,
+            Some(Entry {
+                data: Data::SortedSet(_),
+                ..
+            }) => Kind::SortedSet,
         }
+    }
+
+    /// The keys this store holds that `wanted` asks for.
+    ///
+    /// Every key is looked at either way, which makes this the moment to be rid
+    /// of the ones whose time has passed: a key that has expired is no longer
+    /// there to be listed.
+    pub fn keys(&self, wanted: impl Fn(&Bytes) -> bool) -> Vec<Bytes> {
+        let mut state = self.state();
+        state.entries.retain(|_, entry| !entry.has_expired());
+
+        state
+            .entries
+            .keys()
+            .filter(|key| wanted(key))
+            .cloned()
+            .collect()
     }
 
     /// The versions these keys hold now, for a client that wants to be told
@@ -144,6 +169,9 @@ enum Data {
     /// is for: a `Vec` would shift every element on each `LPUSH` and `LPOP`.
     List(VecDeque<Bytes>),
     Stream(Vec<streams::StreamEntry>),
+    /// Members held in the order of their scores, so that the ones asked for
+    /// most — by where they fall — are found without a search.
+    SortedSet(sorted_sets::SortedSet),
 }
 
 impl Entry {
@@ -158,6 +186,20 @@ impl Entry {
     fn has_expired(&self) -> bool {
         self.expires_at
             .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+}
+
+/// Turns an index into an offset from the start. Negative indexes count back
+/// from the end, and one reaching past the start clamps to the first element
+/// rather than wrapping around.
+///
+/// Lists and sorted sets are both read off by where their elements fall, and
+/// Redis counts them the same way.
+fn resolve_index(index: i64, len: usize) -> usize {
+    if index >= 0 {
+        index as usize
+    } else {
+        len.saturating_sub(index.unsigned_abs() as usize)
     }
 }
 
