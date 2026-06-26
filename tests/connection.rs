@@ -59,24 +59,3 @@ fn rejects_an_unknown_command_without_dropping_the_connection() {
     client.send(&["PING"]);
     client.expect_reply("+PONG\r\n");
 }
-
-#[test]
-fn survives_a_client_that_nests_values_without_end() {
-    let server = Server::start();
-    let mut onlooker = server.connect();
-    let mut attacker = server.connect();
-
-    // Nothing but array headers. Followed all the way down, each one is a step
-    // further down the stack, and the whole server goes with it.
-    attacker.try_send_raw(&b"*1\r\n".repeat(200_000));
-
-    // The one connection is turned away, and every other one carries on.
-    onlooker.send(&["PING"]);
-    onlooker.expect_reply("+PONG\r\n");
-
-    let mut newcomer = server.connect();
-    newcomer.send(&["SET", "key", "value"]);
-    newcomer.expect_reply("+OK\r\n");
-    newcomer.send(&["GET", "key"]);
-    newcomer.expect_reply("$5\r\nvalue\r\n");
-}

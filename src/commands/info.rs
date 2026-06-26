@@ -2,7 +2,6 @@ use super::text;
 use crate::resp::Value;
 use crate::server::Server;
 use bytes::Bytes;
-use std::fmt::Write;
 
 /// The sections `INFO` knows how to report on, in the order it reports them.
 const SECTIONS: &[&str] = &["replication"];
@@ -47,11 +46,9 @@ fn report(sections: &[&str], server: &Server) -> Value {
             };
 
             let replication = &server.replication;
-            // Writing into a `String` cannot fail, so the results are safe to
-            // unwrap, the way `resp` does when laying values out.
-            write!(report, "role:{role}\r\n").unwrap();
-            write!(report, "master_replid:{}\r\n", replication.id).unwrap();
-            write!(report, "master_repl_offset:{}\r\n", replication.offset()).unwrap();
+            report.push_str(&format!("role:{role}\r\n"));
+            report.push_str(&format!("master_replid:{}\r\n", replication.id));
+            report.push_str(&format!("master_repl_offset:{}\r\n", replication.offset));
         }
     }
 

@@ -1,66 +1,69 @@
 # Redis, written in Rust
 
-[![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
-
-A Redis server built from scratch on top of Tokio, following the
+A Redis server built from scratch, following the
 ["Build Your Own Redis"](https://codecrafters.io/challenges/redis) challenge.
-No Redis library of any kind: the wire protocol, RDB parsing, AOF engine,
-replication handshake, and geospatial indexing are all implemented from scratch.
+It speaks the real Redis wire protocol, so `redis-cli` and any Redis client
+library can talk to it.
 
-<p align=center>
-  <img src="docs/demo.gif" alt="Starting the server, then asking it for strings, sorted sets and distances with redis-cli, and finding it all still there after a restart" width="100%">
-</p>
-
-## Quick Start
+## Running it
 
 ```sh
-# Start the server on default port (6379)
-cargo run
-
-# Or run with replication / persistence flags
-cargo run -- --port 6380 --replicaof "localhost 6379"
-cargo run -- --appendonly yes --appendfsync everysec
-
-# Test with redis-cli
-redis-cli PING
+cargo run                    # listens on 127.0.0.1:6379
+cargo run -- --port 6380     # or wherever you like
+cargo run -- --replicaof "localhost 6379"   # as a replica of another server
+redis-cli PING               # from another terminal
 ```
 
-## Implemented Commands
+## What it supports
 
-- **Strings & Connection:** `PING`, `ECHO`, `SET` (with `EX`/`PX`), `GET`, `INCR`
-- **Lists:** `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP` (async blocking with timeout)
-- **Sorted Sets & Geo:** `ZADD`, `ZRANK`, `ZRANGE`, `ZCARD`, `ZSCORE`, `ZREM`, `GEOADD`, `GEOPOS`, `GEODIST`, `GEOSEARCH`
-- **Streams:** `XADD`, `XRANGE`, `XREAD` (with `BLOCK` and `$`)
-- **Transactions & Pub/Sub:** `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PUBLISH`
-- **Replication & Persistence:** `REPLCONF`, `PSYNC`, `WAIT`, `INFO`, `KEYS`, `TYPE`, `CONFIG GET`
-- **ACL:** `AUTH`, `ACL WHOAMI`, `ACL GETUSER`, `ACL SETUSER`
+| Area | Commands |
+| --- | --- |
+| Connection | `PING`, `ECHO` |
+| Strings | `SET` (with `EX` / `PX` expiry), `GET`, `INCR` |
+| Lists | `RPUSH`, `LPUSH`, `LRANGE`, `LLEN`, `LPOP`, `BLPOP` |
+| Streams | `XADD`, `XRANGE`, `XREAD` (with `BLOCK` and `$`) |
+| Keys | `TYPE` |
+| Server | `INFO` (the `replication` section) |
+| Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` |
 
-## Architecture & Design Notes
+Beyond the individual commands, the server:
 
-- **Binary-Safe Protocol:** Keys, values, channel names, and payloads are raw byte buffers (`Bytes`), supporting arbitrary binary data without UTF-8 constraints.
-- **Async Concurrency:** Built on Tokio with one lightweight task per connection. Command pipelining and packet framing are fully handled.
-- **Replication & Side-Effect Propagation:** The master propagates state changes rather than raw commands where they differ (e.g., a `BLPOP` is propagated as an `LPOP` so replicas never block).
-- **Optimistic Concurrency Control:** `WATCH` tracks key versions per connection, aborting transactions on conflict without holding global locks during execution.
-- **Geospatial Indexing:** Uses 52-bit interleaved Morton codes (geohashes) stored as sorted set scores, calculating spherical distances via the Haversine formula.
-- **Multi-Part AOF & Replay:** Replays existing append-only logs on startup before arming the live writer to guarantee zero duplicate records across restarts.
+- is binary safe, so keys and values may hold any bytes at all, not just text;
+- serves any number of clients at once, one task per connection;
+- handles several commands arriving in a single packet, and commands split
+  across packets;
+- expires keys lazily, the way Redis does;
+- blocks clients on `BLPOP` and `XREAD BLOCK`, waking the one that has waited
+  longest for a list element and every waiting reader for a stream entry;
+- keeps each connection's transaction to itself, queueing commands between
+  `MULTI` and `EXEC` so that the store sees none of them until the end;
+- abandons a transaction whose `WATCH`ed keys were changed by someone else in
+  the meantime, which is how Redis locks without holding a lock;
+- replies with the same error messages as Redis, including `WRONGTYPE` and the
+  arity and syntax errors.
 
-## Source Layout
+## Layout
 
 ```
 src/
-  main.rs          binds the port, replays the log, accepts connections
-  config.rs        server configuration & CLI parsing
-  server.rs        core server state, replication metadata, users
-  connection.rs    client connection handler & command loop
-  resp.rs          RESP protocol serialization & deserialization
-  rdb.rs           RDB binary snapshot parser
-  aof.rs           multi-part AOF log writer & manifest manager
-  replica.rs       master-replica synchronization handshake
-  replicas.rs      connected replica tracking & write propagation
-  channels.rs      pub/sub subscription registry
-  users.rs         ACL & SHA-256 hashed authentication
-  glob.rs          glob pattern matcher for KEYS
-  commands/        command dispatchers grouped by subsystem
-  store/           thread-safe in-memory storage engines
-tests/             integration test suite running over real TCP sockets
+  main.rs         binds the port and accepts connections
+  config.rs       the settings the server was started with
+  server.rs       what this server is: its settings and replication id
+  replica.rs      the conversation a replica holds with its master
+  connection.rs   reads commands from one client and writes the replies
+  resp.rs         the Redis serialization protocol: parsing and encoding
+  commands/       one module per command family, plus the dispatcher
+  store/          the shared key-value state, split by data type
+tests/            integration tests that drive a real server over TCP
+```
+
+## Tests
+
+The test suite starts the compiled binary and talks to it over a socket, so it
+exercises the same path a real client takes.
+
+```sh
+cargo test
+cargo clippy --all-targets
+cargo fmt --check
 ```
