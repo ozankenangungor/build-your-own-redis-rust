@@ -15,6 +15,41 @@ fn greets_the_master_it_was_told_to_follow() {
 }
 
 #[test]
+fn tells_the_master_where_to_reach_it_and_what_it_can_do() {
+    let master = FakeMaster::start();
+    let replica = Server::start_with(&["--replicaof", &format!("localhost {}", master.port())]);
+
+    let mut conversation = master.accept();
+
+    conversation.expect_reply("*1\r\n$4\r\nPING\r\n");
+    conversation.send_raw(b"+PONG\r\n");
+
+    // The port it reports is the one it is really listening on, which is not
+    // always the one it was asked for.
+    let port = replica.port().to_string();
+    conversation.expect_reply(&format!(
+        "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${}\r\n{port}\r\n",
+        port.len(),
+    ));
+    conversation.send_raw(b"+OK\r\n");
+
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n");
+    conversation.send_raw(b"+OK\r\n");
+}
+
+#[test]
+fn waits_for_the_master_to_answer_before_going_on() {
+    let master = FakeMaster::start();
+    let _replica = Server::start_with(&["--replicaof", &format!("localhost {}", master.port())]);
+
+    let mut conversation = master.accept();
+    conversation.expect_reply("*1\r\n$4\r\nPING\r\n");
+
+    // Nothing has answered the greeting, so nothing more should arrive.
+    conversation.expect_silence();
+}
+
+#[test]
 fn leaves_the_master_alone_unless_told_to_follow_one() {
     let master = FakeMaster::start();
     let _server = Server::start_with(&["--port", "0"]);

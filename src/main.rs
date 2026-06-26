@@ -20,15 +20,16 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", server.config.port)).await?;
     let store = Store::default();
 
-    // Port zero leaves the choice to the operating system, so report the port
-    // that was settled on rather than the one that was asked for.
-    eprintln!("listening on port {}", listener.local_addr()?.port());
+    // Port zero leaves the choice to the operating system, so the port that was
+    // settled on is the one to report, and the one to tell a master about.
+    let port = listener.local_addr()?.port();
+    eprintln!("listening on port {port}");
 
     // Following a master is its own conversation, held alongside the one with
     // this server's own clients rather than before it.
     if let Some(master) = server.config.replicaof.clone() {
         tokio::spawn(async move {
-            if let Err(e) = replica::follow(&master).await {
+            if let Err(e) = replica::follow(&master, port).await {
                 eprintln!(
                     "could not follow the master at {}:{}: {e}",
                     master.host, master.port

@@ -45,6 +45,16 @@ impl Server {
         server
     }
 
+    /// The port this server ended up on, which a test may need to recognise it
+    /// by when it introduces itself elsewhere.
+    pub fn port(&self) -> u16 {
+        self.addr
+            .rsplit(':')
+            .next()
+            .and_then(|port| port.parse().ok())
+            .expect("the address holds a port")
+    }
+
     pub fn connect(&self) -> Client {
         let stream = TcpStream::connect(&self.addr).expect("failed to connect to server");
         stream
@@ -174,6 +184,21 @@ impl Client {
         let mut buf = vec![0u8; expected.len()];
         self.0.read_exact(&mut buf).expect("failed to read reply");
         assert_eq!(buf, expected);
+    }
+
+    /// Asserts that nothing more arrives, for a party that should be waiting to
+    /// be spoken to.
+    pub fn expect_silence(&mut self) {
+        self.0
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .expect("failed to set read timeout");
+
+        let mut buf = [0u8; 64];
+        match self.0.read(&mut buf) {
+            Ok(0) => {}
+            Ok(read) => panic!("heard {:?}", String::from_utf8_lossy(&buf[..read])),
+            Err(_) => {}
+        }
     }
 
     /// Reads a bulk string reply and returns its contents, for the replies whose
