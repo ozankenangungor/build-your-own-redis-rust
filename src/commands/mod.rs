@@ -1,6 +1,7 @@
 mod info;
 mod keys;
 mod lists;
+mod replication;
 mod streams;
 mod strings;
 mod transactions;
@@ -103,6 +104,9 @@ async fn dispatch(
         return reply;
     }
     if let Some(reply) = info::run(uppercased, args, server) {
+        return reply;
+    }
+    if let Some(reply) = replication::run(uppercased, args) {
         return reply;
     }
 
