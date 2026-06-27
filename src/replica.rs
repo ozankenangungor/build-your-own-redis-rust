@@ -26,6 +26,20 @@ pub async fn follow(master: &Master, port: u16) -> Result<()> {
     // back up where it left off rather than asking for all of it again.
     master.say(&["REPLCONF", "capa", "psync2"], "OK").await?;
 
+    // Having followed no one before, the replica knows neither whose history to
+    // ask for nor where in it to start: `?` and `-1` say so, and ask for all
+    // of it.
+    let reply = master.ask(&["PSYNC", "?", "-1"]).await?;
+    let Value::SimpleString(agreement) = &reply else {
+        bail!("asked to sync and heard {reply:?}");
+    };
+    ensure!(
+        agreement.starts_with("FULLRESYNC"),
+        "asked to sync and was told '{agreement}'",
+    );
+
+    // What follows is the master's whole dataset, and then every command it is
+    // given from here on. Taking those in is still to come.
     Ok(())
 }
 
@@ -50,15 +64,20 @@ impl Conversation {
     /// Says one command and waits for the master to answer as it should. A
     /// master that answers otherwise is not one this replica can follow.
     async fn say(&mut self, command: &[&str], expected: &str) -> Result<()> {
-        self.stream.write_all(&as_command(command).encode()).await?;
-
-        let reply = self.hear().await?;
+        let reply = self.ask(command).await?;
         ensure!(
             reply == Value::SimpleString(expected.to_string()),
             "said {command:?} and heard {reply:?} rather than '{expected}'",
         );
 
         Ok(())
+    }
+
+    /// Says one command and hands back the answer, for when what the master
+    /// will say is not known in advance.
+    async fn ask(&mut self, command: &[&str]) -> Result<Value> {
+        self.stream.write_all(&as_command(command).encode()).await?;
+        self.hear().await
     }
 
     /// Reads one reply, reading more from the master until a whole one arrives.

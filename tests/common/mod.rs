@@ -186,6 +186,19 @@ impl Client {
         assert_eq!(buf, expected);
     }
 
+    /// Reads one command without checking what it is, for the steps of a
+    /// conversation a test is only passing through.
+    pub fn read_command(&mut self) -> Vec<String> {
+        let header = self.read_line();
+        let count: usize = header
+            .strip_prefix('*')
+            .unwrap_or_else(|| panic!("expected an array, got {header:?}"))
+            .parse()
+            .expect("array length");
+
+        (0..count).map(|_| self.read_bulk_string()).collect()
+    }
+
     /// Asserts that nothing more arrives, for a party that should be waiting to
     /// be spoken to.
     pub fn expect_silence(&mut self) {

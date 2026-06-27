@@ -38,6 +38,39 @@ fn tells_the_master_where_to_reach_it_and_what_it_can_do() {
 }
 
 #[test]
+fn asks_the_master_for_its_whole_history() {
+    let master = FakeMaster::start();
+    let _replica = Server::start_with(&["--replicaof", &format!("localhost {}", master.port())]);
+
+    let mut conversation = master.accept();
+    conversation.expect_reply("*1\r\n$4\r\nPING\r\n");
+    conversation.send_raw(b"+PONG\r\n");
+    conversation.read_command();
+    conversation.send_raw(b"+OK\r\n");
+    conversation.read_command();
+    conversation.send_raw(b"+OK\r\n");
+
+    // Following no one so far, it knows neither whose history to ask for nor
+    // where in it to start.
+    conversation.expect_reply("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n");
+    conversation.send_raw(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4d990aeeb 0\r\n");
+}
+
+#[test]
+fn waits_for_each_answer_before_asking_the_next_thing() {
+    let master = FakeMaster::start();
+    let _replica = Server::start_with(&["--replicaof", &format!("localhost {}", master.port())]);
+
+    let mut conversation = master.accept();
+    conversation.expect_reply("*1\r\n$4\r\nPING\r\n");
+    conversation.send_raw(b"+PONG\r\n");
+    conversation.read_command();
+
+    // The first REPLCONF has gone unanswered, so the second must not follow.
+    conversation.expect_silence();
+}
+
+#[test]
 fn waits_for_the_master_to_answer_before_going_on() {
     let master = FakeMaster::start();
     let _replica = Server::start_with(&["--replicaof", &format!("localhost {}", master.port())]);
