@@ -106,7 +106,7 @@ async fn dispatch(
     if let Some(reply) = info::run(uppercased, args, server) {
         return reply;
     }
-    if let Some(reply) = replication::run(uppercased, args) {
+    if let Some(reply) = replication::run(uppercased, args, server) {
         return reply;
     }
 

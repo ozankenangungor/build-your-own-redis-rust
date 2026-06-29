@@ -14,22 +14,24 @@ use tokio::net::TcpStream;
 /// The port is the one this server ended up listening on, which is not always
 /// the one it was asked for, and is what the master will reach it on.
 pub async fn follow(master: &Master, port: u16) -> Result<()> {
-    let mut master = Conversation::connect(master).await?;
+    let mut conversation = Conversation::connect(master).await?;
 
-    master.say(&["PING"], "PONG").await?;
+    conversation.say(&["PING"], "PONG").await?;
     // Where to find this replica, which the master keeps for reporting rather
     // than for replicating.
-    master
+    conversation
         .say(&["REPLCONF", "listening-port", &port.to_string()], "OK")
         .await?;
     // What this replica can do. Claiming `psync2` says it can pick a history
     // back up where it left off rather than asking for all of it again.
-    master.say(&["REPLCONF", "capa", "psync2"], "OK").await?;
+    conversation
+        .say(&["REPLCONF", "capa", "psync2"], "OK")
+        .await?;
 
     // Having followed no one before, the replica knows neither whose history to
     // ask for nor where in it to start: `?` and `-1` say so, and ask for all
     // of it.
-    let reply = master.ask(&["PSYNC", "?", "-1"]).await?;
+    let reply = conversation.ask(&["PSYNC", "?", "-1"]).await?;
     let Value::SimpleString(agreement) = &reply else {
         bail!("asked to sync and heard {reply:?}");
     };
@@ -37,6 +39,8 @@ pub async fn follow(master: &Master, port: u16) -> Result<()> {
         agreement.starts_with("FULLRESYNC"),
         "asked to sync and was told '{agreement}'",
     );
+
+    eprintln!("following the master at {}:{}", master.host, master.port);
 
     // What follows is the master's whole dataset, and then every command it is
     // given from here on. Taking those in is still to come.

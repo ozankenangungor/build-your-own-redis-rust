@@ -4,6 +4,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// A running instance of the server, killed when it goes out of scope.
@@ -11,6 +12,8 @@ pub struct Server {
     process: Child,
     /// This server's own port, so that tests never talk to one another's.
     addr: String,
+    /// What the server has said about itself since it started.
+    logs: Arc<Mutex<Vec<String>>>,
 }
 
 impl Server {
@@ -39,10 +42,22 @@ impl Server {
         let mut server = Self {
             process,
             addr: String::new(),
+            logs: Arc::new(Mutex::new(Vec::new())),
         };
-        server.addr = format!("127.0.0.1:{}", port_from(logs));
+
+        let port = port_from(logs, Arc::clone(&server.logs));
+        server.addr = format!("127.0.0.1:{port}");
 
         server
+    }
+
+    /// What the server has said about itself so far. Waits a moment first, so
+    /// that a test asking about something that has just happened elsewhere is
+    /// not asking too early.
+    pub fn logs(&self) -> Vec<String> {
+        std::thread::sleep(Duration::from_millis(300));
+
+        self.logs.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The port this server ended up on, which a test may need to recognise it
@@ -122,9 +137,9 @@ impl FakeMaster {
 }
 
 /// Reads the port the server announces once it is listening, then leaves a
-/// thread to swallow the rest of its logs so that a full pipe can never bring
-/// the server to a halt.
-fn port_from(logs: impl Read + Send + 'static) -> u16 {
+/// thread gathering the rest of what it says. Something has to keep reading:
+/// a full pipe would bring the server to a halt.
+fn port_from(logs: impl Read + Send + 'static, into: Arc<Mutex<Vec<String>>>) -> u16 {
     let mut logs = BufReader::new(logs);
     let mut line = String::new();
 
@@ -140,7 +155,11 @@ fn port_from(logs: impl Read + Send + 'static) -> u16 {
         }
     };
 
-    std::thread::spawn(move || std::io::copy(&mut logs, &mut std::io::sink()));
+    std::thread::spawn(move || {
+        for line in logs.lines().map_while(Result::ok) {
+            into.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+        }
+    });
 
     port
 }
@@ -230,7 +249,7 @@ impl Client {
         String::from_utf8_lossy(&buf[..length]).into_owned()
     }
 
-    fn read_line(&mut self) -> String {
+    pub fn read_line(&mut self) -> String {
         let mut line = Vec::new();
         let mut byte = [0u8; 1];
 
