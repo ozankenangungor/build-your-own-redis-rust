@@ -161,3 +161,62 @@ fn goes_on_serving_when_a_replica_hangs_up() {
         client.expect_reply("+OK\r\n");
     }
 }
+
+#[test]
+fn passes_a_write_on_to_every_replica() {
+    let server = Server::start();
+    let mut replicas: Vec<common::Client> = (0..3).map(|_| follow(&server)).collect();
+    let mut client = server.connect();
+
+    for (key, value) in [("foo", "1"), ("bar", "2"), ("baz", "3")] {
+        client.send(&["SET", key, value]);
+        client.expect_reply("+OK\r\n");
+    }
+
+    // Each of them is a copy of the same store, so each hears the same things
+    // in the same order.
+    for replica in &mut replicas {
+        for (key, value) in [("foo", "1"), ("bar", "2"), ("baz", "3")] {
+            replica.expect_reply(&format!(
+                "*3\r\n$3\r\nSET\r\n${}\r\n{key}\r\n${}\r\n{value}\r\n",
+                key.len(),
+                value.len(),
+            ));
+        }
+    }
+}
+
+#[test]
+fn tells_a_replica_only_of_what_followed_its_arrival() {
+    let server = Server::start();
+    let mut early = follow(&server);
+    let mut client = server.connect();
+
+    client.send(&["SET", "before", "1"]);
+    client.expect_reply("+OK\r\n");
+    early.expect_reply("*3\r\n$3\r\nSET\r\n$6\r\nbefore\r\n$1\r\n1\r\n");
+
+    let mut late = follow(&server);
+
+    client.send(&["SET", "after", "2"]);
+    client.expect_reply("+OK\r\n");
+
+    // The one that arrived later hears this and nothing before it.
+    late.expect_reply("*3\r\n$3\r\nSET\r\n$5\r\nafter\r\n$1\r\n2\r\n");
+    early.expect_reply("*3\r\n$3\r\nSET\r\n$5\r\nafter\r\n$1\r\n2\r\n");
+}
+
+#[test]
+fn goes_on_telling_the_others_when_one_replica_hangs_up() {
+    let server = Server::start();
+    let mut staying = follow(&server);
+    let leaving = follow(&server);
+    let mut client = server.connect();
+
+    drop(leaving);
+
+    client.send(&["SET", "key", "value"]);
+    client.expect_reply("+OK\r\n");
+
+    staying.expect_reply("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n");
+}

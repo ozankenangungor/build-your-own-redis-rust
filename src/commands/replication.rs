@@ -29,6 +29,12 @@ pub fn run(command: &str, args: &[Bytes], server: &Server) -> Option<Value> {
 
                 // Agreeing to start it afresh is only half the answer: what
                 // the replica is to start from follows straight after.
+                //
+                // What goes out is an empty dataset rather than this server's
+                // own, so a replica arriving after the store already holds
+                // something starts out missing it, and only ever hears about
+                // the changes that follow. Writing the store out as a file is
+                // what would close that.
                 Value::Sequence(vec![
                     Value::SimpleString(format!(
                         "FULLRESYNC {} {}",
