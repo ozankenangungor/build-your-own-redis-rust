@@ -233,6 +233,22 @@ impl Client {
         }
     }
 
+    /// Reads a file, which is laid out like a bulk string but for the CRLF it
+    /// does not end in.
+    pub fn read_file(&mut self) -> Vec<u8> {
+        let header = self.read_line();
+        let length: usize = header
+            .strip_prefix('$')
+            .unwrap_or_else(|| panic!("expected a file, got {header:?}"))
+            .parse()
+            .expect("file length");
+
+        let mut file = vec![0u8; length];
+        self.0.read_exact(&mut file).expect("failed to read a file");
+
+        file
+    }
+
     /// Reads a bulk string reply and returns its contents, for the replies whose
     /// exact bytes cannot be known in advance.
     pub fn read_bulk_string(&mut self) -> String {

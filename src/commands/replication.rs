@@ -3,6 +3,14 @@ use crate::resp::Value;
 use crate::server::Server;
 use bytes::Bytes;
 
+/// A dataset holding nothing, in the format Redis saves its data in.
+///
+/// A file is a header naming the format's version, then the data, then a marker
+/// for the end and a checksum of everything before it. With no data to write,
+/// only the header and the marker are left, and a checksum of zero, which is
+/// how the format says that nothing was checked.
+const EMPTY_DATASET: &[u8] = b"REDIS0011\xff\0\0\0\0\0\0\0\0";
+
 /// Handles the commands replicas send their master. `None` means the command
 /// belongs to another module.
 pub fn run(command: &str, args: &[Bytes], server: &Server) -> Option<Value> {
@@ -19,10 +27,15 @@ pub fn run(command: &str, args: &[Bytes], server: &Server) -> Option<Value> {
             [_history, _offset] => {
                 let replication = &server.replication;
 
-                Value::SimpleString(format!(
-                    "FULLRESYNC {} {}",
-                    replication.id, replication.offset
-                ))
+                // Agreeing to start it afresh is only half the answer: what
+                // the replica is to start from follows straight after.
+                Value::Sequence(vec![
+                    Value::SimpleString(format!(
+                        "FULLRESYNC {} {}",
+                        replication.id, replication.offset
+                    )),
+                    Value::File(Bytes::from_static(EMPTY_DATASET)),
+                ])
             }
             _ => wrong_arity("psync"),
         },

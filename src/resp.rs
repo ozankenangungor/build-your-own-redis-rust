@@ -21,6 +21,13 @@ pub enum Value {
     Null,
     /// The null array, which is what a blocking command replies on a timeout.
     NullArray,
+    /// A file, laid out like a bulk string but with no CRLF after it: what
+    /// follows a file is not another value. This is how a master hands a
+    /// replica the whole of its dataset.
+    File(Bytes),
+    /// Values written one after another, for the answers that are more than one
+    /// value. Only ever written, never read.
+    Sequence(Vec<Value>),
 }
 
 impl Value {
@@ -49,6 +56,15 @@ impl Value {
             }
             Value::Null => out.extend_from_slice(b"$-1\r\n"),
             Value::NullArray => out.extend_from_slice(b"*-1\r\n"),
+            Value::File(bytes) => {
+                write!(out, "${}\r\n", bytes.len()).unwrap();
+                out.extend_from_slice(bytes);
+            }
+            Value::Sequence(values) => {
+                for value in values {
+                    value.encode_into(out);
+                }
+            }
         }
     }
 }
@@ -186,6 +202,23 @@ mod tests {
         let expected = Value::Array(vec![Value::BulkString(Bytes::from_static(b"\xff\x00\xfe"))]);
 
         assert_eq!(parse(input).unwrap(), Some((expected, input.len())));
+    }
+
+    #[test]
+    fn encodes_a_file_without_the_crlf_a_bulk_string_ends_in() {
+        let value = Value::File(Bytes::from_static(b"\x00\x01"));
+
+        assert_eq!(value.encode(), b"$2\r\n\x00\x01");
+    }
+
+    #[test]
+    fn encodes_a_sequence_as_one_value_after_another() {
+        let value = Value::Sequence(vec![
+            Value::SimpleString("FIRST".into()),
+            Value::SimpleString("SECOND".into()),
+        ]);
+
+        assert_eq!(value.encode(), b"+FIRST\r\n+SECOND\r\n");
     }
 
     #[test]

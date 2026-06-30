@@ -138,3 +138,34 @@ fn rejects_a_psync_that_says_too_little() {
     replica.send(&["PSYNC", "?"]);
     replica.expect_reply("-ERR wrong number of arguments for 'psync' command\r\n");
 }
+
+#[test]
+fn hands_the_replica_the_dataset_to_start_from() {
+    let server = Server::start();
+    let mut replica = server.connect();
+
+    replica.send(&["PSYNC", "?", "-1"]);
+    assert!(replica.read_line().starts_with("+FULLRESYNC "));
+
+    let dataset = replica.read_file();
+
+    // A file Redis saved, rather than anything of our own making.
+    assert!(dataset.starts_with(b"REDIS"), "{dataset:?}");
+    // The marker for the end, and nothing but a checksum after it.
+    assert_eq!(dataset[dataset.len() - 9], 0xff, "{dataset:?}");
+}
+
+#[test]
+fn sends_the_dataset_without_the_crlf_a_bulk_string_ends_in() {
+    let server = Server::start();
+    let mut replica = server.connect();
+
+    replica.send(&["PSYNC", "?", "-1"]);
+    replica.read_line();
+    replica.read_file();
+
+    // Were a CRLF written after the file, it would be read as the start of
+    // whatever the master said next.
+    replica.send(&["PING"]);
+    replica.expect_reply("+PONG\r\n");
+}
