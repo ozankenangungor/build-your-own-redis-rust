@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod connection;
 mod replica;
+mod replicas;
 mod resp;
 mod server;
 mod store;

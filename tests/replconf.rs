@@ -164,8 +164,11 @@ fn sends_the_dataset_without_the_crlf_a_bulk_string_ends_in() {
     replica.read_line();
     replica.read_file();
 
-    // Were a CRLF written after the file, it would be read as the start of
-    // whatever the master said next.
-    replica.send(&["PING"]);
-    replica.expect_reply("+PONG\r\n");
+    let mut client = server.connect();
+    client.send(&["SET", "key", "value"]);
+    client.expect_reply("+OK\r\n");
+
+    // Were a CRLF written after the file, it would arrive here, ahead of the
+    // command that really follows it.
+    replica.expect_reply("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n");
 }

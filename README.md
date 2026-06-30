@@ -40,6 +40,8 @@ Beyond the individual commands, the server:
   `MULTI` and `EXEC` so that the store sees none of them until the end;
 - abandons a transaction whose `WATCH`ed keys were changed by someone else in
   the meantime, which is how Redis locks without holding a lock;
+- passes what it is told to change on to the replicas following it, in the
+  order it was told, and keeps reads to itself;
 - replies with the same error messages as Redis, including `WRONGTYPE` and the
   arity and syntax errors.
 
@@ -51,6 +53,7 @@ src/
   config.rs       the settings the server was started with
   server.rs       what this server is: its settings and replication id
   replica.rs      the conversation a replica holds with its master
+  replicas.rs     the replicas a master keeps up to date
   connection.rs   reads commands from one client and writes the replies
   resp.rs         the Redis serialization protocol: parsing and encoding
   commands/       one module per command family, plus the dispatcher

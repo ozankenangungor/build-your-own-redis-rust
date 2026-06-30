@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::replicas::Replicas;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How long a replication id is, in hexadecimal characters.
@@ -9,6 +10,9 @@ const ID_LENGTH: usize = 40;
 pub struct Server {
     pub config: Config,
     pub replication: Replication,
+    /// The replicas following this server, each waiting to be told what has
+    /// changed.
+    pub replicas: Replicas,
 }
 
 /// A server's place in the history of a dataset.
@@ -29,6 +33,7 @@ impl Server {
                 id: new_id(),
                 offset: 0,
             },
+            replicas: Replicas::default(),
         }
     }
 }

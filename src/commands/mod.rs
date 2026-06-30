@@ -23,16 +23,25 @@ struct Command {
     args: Vec<Bytes>,
 }
 
+/// What a command leaves the connection it came in on.
+pub enum Answer {
+    /// Send this back, and go on serving whoever sent it.
+    Reply(Value),
+    /// Send this back, after which the connection is a replica's: it carries
+    /// what the master is told to change and nothing is expected in return.
+    Replica(Value),
+}
+
 /// Runs one client command and produces the reply to send back.
 pub async fn run(
     command: Value,
     store: &Store,
     transaction: &mut Transaction,
     server: &Server,
-) -> Value {
+) -> Answer {
     let command = match Command::parse(command) {
         Ok(command) => command,
-        Err(reply) => return reply,
+        Err(reply) => return Answer::Reply(reply),
     };
 
     // Inside a transaction a command is only written down. Nothing runs until
@@ -41,14 +50,23 @@ pub async fn run(
         && let Some(queued) = transaction.queued()
     {
         queued.push(command);
-        return Value::SimpleString("QUEUED".into());
+        return Answer::Reply(Value::SimpleString("QUEUED".into()));
     }
 
-    match transactions::steer(&command, transaction, store) {
+    let reply = match transactions::steer(&command, transaction, store) {
         Some(Outcome::Reply(reply)) => reply,
         Some(Outcome::Execute(queued)) => execute(queued, store, transaction, server).await,
         None => dispatch(&command, store, transaction, server).await,
+    };
+
+    // A replica that has been handed the dataset is no longer a client. What
+    // becomes of the connection is the dispatcher's to decide, since the
+    // command modules answer without knowing what carried them.
+    if command.uppercased == "PSYNC" && !matches!(reply, Value::Error(_)) {
+        return Answer::Replica(reply);
     }
+
+    Answer::Reply(reply)
 }
 
 /// Runs the commands a transaction had queued, gathering their replies into the
@@ -77,6 +95,27 @@ async fn execute(
 /// Each module below claims the commands it knows and returns `None` for the
 /// rest, so adding a command means touching only the module it belongs to.
 async fn dispatch(
+    command: &Command,
+    store: &Store,
+    transaction: &mut Transaction,
+    server: &Server,
+) -> Value {
+    let reply = run_against(command, store, transaction, server).await;
+
+    // Replicas are told what changed only once it has, and only by the server
+    // the change was asked of: a replica passes nothing on of its own.
+    if changes_the_store(&command.uppercased)
+        && !matches!(reply, Value::Error(_))
+        && server.config.replicaof.is_none()
+    {
+        server.replicas.send(&command.as_sent());
+    }
+
+    reply
+}
+
+/// Hands the command to the module that knows it.
+async fn run_against(
     command: &Command,
     store: &Store,
     transaction: &mut Transaction,
@@ -113,7 +152,30 @@ async fn dispatch(
     unknown_command(name)
 }
 
+/// Whether a command leaves the store different from how it found it, and so
+/// has to reach the replicas for them to stay a copy of it.
+///
+/// `BLPOP` is missing on purpose: a replica handed one would wait on it, when
+/// what it needs to be told is that an element went. Redis passes on what a
+/// command did rather than the command itself, which is still to come here.
+fn changes_the_store(command: &str) -> bool {
+    matches!(
+        command,
+        "SET" | "INCR" | "RPUSH" | "LPUSH" | "LPOP" | "XADD"
+    )
+}
+
 impl Command {
+    /// The command as it came in, to be handed on to replicas word for word.
+    fn as_sent(&self) -> Value {
+        let mut parts = Vec::with_capacity(self.args.len() + 1);
+
+        parts.push(Value::BulkString(self.name.clone()));
+        parts.extend(self.args.iter().cloned().map(Value::BulkString));
+
+        Value::Array(parts)
+    }
+
     /// Reads a command as clients send them: an array of bulk strings, the
     /// first of which names the command. The error reply says what was wrong.
     fn parse(command: Value) -> Result<Self, Value> {
