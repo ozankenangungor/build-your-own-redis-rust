@@ -29,8 +29,11 @@ async fn main() -> Result<()> {
     // Following a master is its own conversation, held alongside the one with
     // this server's own clients rather than before it.
     if let Some(master) = server.config.replicaof.clone() {
+        let following = Arc::clone(&server);
+        let store = store.clone();
+
         tokio::spawn(async move {
-            if let Err(e) = replica::follow(&master, port).await {
+            if let Err(e) = replica::follow(&master, port, store, &following).await {
                 eprintln!(
                     "could not follow the master at {}:{}: {e}",
                     master.host, master.port

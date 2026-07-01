@@ -42,6 +42,8 @@ Beyond the individual commands, the server:
   the meantime, which is how Redis locks without holding a lock;
 - passes what it is told to change on to the replicas following it, in the
   order it was told, and keeps reads to itself;
+- follows a master when started with `--replicaof`, taking in its dataset and
+  then every change it is told of, without answering any of them;
 - replies with the same error messages as Redis, including `WRONGTYPE` and the
   arity and syntax errors.
 

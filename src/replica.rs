@@ -1,19 +1,24 @@
+use crate::commands::{self, Transaction};
 use crate::config::Master;
 use crate::resp::{self, Value};
+use crate::server::Server;
+use crate::store::Store;
 use anyhow::{Result, bail, ensure};
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-/// Introduces this server to the master it was told to follow.
+/// Follows the master this server was told to follow, for as long as it is
+/// there to be followed.
 ///
-/// The two agree on how to go on in three steps: a greeting, then what the
-/// replica is and can do, then a request for the master's history. Only the
-/// last is still unspoken.
+/// The two first agree on how to go on, in three steps: a greeting, then what
+/// the replica is and can do, then a request for the master's history. What
+/// comes back is the dataset to start from, and after it every command the
+/// master is given.
 ///
 /// The port is the one this server ended up listening on, which is not always
 /// the one it was asked for, and is what the master will reach it on.
-pub async fn follow(master: &Master, port: u16) -> Result<()> {
+pub async fn follow(master: &Master, port: u16, store: Store, server: &Server) -> Result<()> {
     let mut conversation = Conversation::connect(master).await?;
 
     conversation.say(&["PING"], "PONG").await?;
@@ -40,11 +45,18 @@ pub async fn follow(master: &Master, port: u16) -> Result<()> {
         "asked to sync and was told '{agreement}'",
     );
 
-    eprintln!("following the master at {}:{}", master.host, master.port);
+    // What follows the agreement is the master's whole dataset. It is always
+    // empty for now, so there is nothing in it to take on.
+    let dataset = conversation.take_file().await?;
 
-    // What follows is the master's whole dataset, and then every command it is
-    // given from here on. Taking those in is still to come.
-    Ok(())
+    eprintln!(
+        "following the master at {}:{}, from {} bytes of dataset",
+        master.host,
+        master.port,
+        dataset.len(),
+    );
+
+    conversation.keep_up(store, server).await
 }
 
 /// One replica talking to one master, a command at a time.
@@ -84,7 +96,7 @@ impl Conversation {
         self.hear().await
     }
 
-    /// Reads one reply, reading more from the master until a whole one arrives.
+    /// Reads one value, reading more from the master until a whole one arrives.
     async fn hear(&mut self) -> Result<Value> {
         loop {
             if let Some((reply, consumed)) = resp::parse(&self.heard)? {
@@ -92,11 +104,74 @@ impl Conversation {
                 return Ok(reply);
             }
 
-            if self.stream.read_buf(&mut self.heard).await? == 0 {
-                bail!("the master hung up mid-sentence");
-            }
+            self.fill().await?;
         }
     }
+
+    /// Takes in the file the master sends once it has agreed to sync.
+    ///
+    /// It is laid out like a bulk string but for the CRLF it does not end in,
+    /// so where it ends has to be worked out from the length rather than found.
+    async fn take_file(&mut self) -> Result<Bytes> {
+        let (length, header) = loop {
+            if let Some(found) = file_header(&self.heard)? {
+                break found;
+            }
+
+            self.fill().await?;
+        };
+
+        while self.heard.len() < header + length {
+            self.fill().await?;
+        }
+
+        self.heard.advance(header);
+
+        Ok(self.heard.split_to(length).freeze())
+    }
+
+    /// Takes in what the master is told to change, for as long as it keeps
+    /// telling.
+    ///
+    /// None of it is answered: the master is not waiting on a reply, and one
+    /// sent would be read as something else entirely.
+    async fn keep_up(&mut self, store: Store, server: &Server) -> Result<()> {
+        // A master could open a transaction as any client could, so the
+        // connection keeps one the way every other connection does.
+        let mut transaction = Transaction::default();
+
+        loop {
+            let command = self.hear().await?;
+            commands::run(command, &store, &mut transaction, server).await;
+        }
+    }
+
+    /// Reads more from the master, which has nothing more to say only when it
+    /// has gone.
+    async fn fill(&mut self) -> Result<()> {
+        if self.stream.read_buf(&mut self.heard).await? == 0 {
+            bail!("the master hung up");
+        }
+
+        Ok(())
+    }
+}
+
+/// Reads the length off the front of a file, along with how many bytes the
+/// length itself took up. `None` means the length is not all there yet.
+fn file_header(heard: &[u8]) -> Result<Option<(usize, usize)>> {
+    let Some(end) = heard.windows(2).position(|pair| pair == b"\r\n") else {
+        return Ok(None);
+    };
+
+    let Some(length) = heard[..end].strip_prefix(b"$") else {
+        bail!(
+            "expected a file, found {:?}",
+            String::from_utf8_lossy(&heard[..end])
+        );
+    };
+
+    Ok(Some((str::from_utf8(length)?.parse()?, end + 2)))
 }
 
 /// Lays a command out the way clients send them, as an array of bulk strings.
@@ -116,6 +191,22 @@ mod tests {
     #[test]
     fn lays_out_a_command_as_clients_send_them() {
         assert_eq!(as_command(&["PING"]).encode(), b"*1\r\n$4\r\nPING\r\n");
+    }
+
+    #[test]
+    fn reads_the_length_off_the_front_of_a_file() {
+        assert_eq!(file_header(b"$18\r\nREDIS").unwrap(), Some((18, 5)));
+    }
+
+    #[test]
+    fn waits_for_the_whole_of_a_file_length() {
+        assert_eq!(file_header(b"$1").unwrap(), None);
+        assert_eq!(file_header(b"$18\r").unwrap(), None);
+    }
+
+    #[test]
+    fn turns_down_what_is_not_a_file_at_all() {
+        assert!(file_header(b"+OK\r\n").is_err());
     }
 
     #[test]

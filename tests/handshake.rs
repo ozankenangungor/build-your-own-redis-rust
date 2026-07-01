@@ -118,7 +118,14 @@ fn gets_through_the_handshake_with_a_master_of_the_same_making() {
     // Both halves of the handshake are ours, so this is the first time they
     // are held to each other rather than to a stand-in.
     let expected = format!("following the master at 127.0.0.1:{}", master.port());
-    assert!(replica.logs().contains(&expected), "{:?}", replica.logs(),);
+    assert!(
+        replica
+            .logs()
+            .iter()
+            .any(|line| line.starts_with(&expected)),
+        "{:?}",
+        replica.logs(),
+    );
 }
 
 #[test]

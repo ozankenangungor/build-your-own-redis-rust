@@ -233,6 +233,55 @@ impl Client {
         }
     }
 
+    /// Reads one reply of any shape, as the bytes it arrived in.
+    pub fn read_reply(&mut self) -> String {
+        let line = self.read_line();
+
+        match line.as_bytes().first() {
+            Some(b'+' | b'-' | b':') => format!("{line}\r\n"),
+            Some(b'$') => {
+                let length: i64 = line[1..].parse().expect("bulk string length");
+                if length < 0 {
+                    return format!("{line}\r\n");
+                }
+
+                let mut rest = vec![0u8; length as usize + 2];
+                self.0.read_exact(&mut rest).expect("failed to read reply");
+
+                format!("{line}\r\n{}", String::from_utf8_lossy(&rest))
+            }
+            Some(b'*') => {
+                let count: i64 = line[1..].parse().expect("array length");
+                if count < 0 {
+                    return format!("{line}\r\n");
+                }
+
+                (0..count).fold(format!("{line}\r\n"), |reply, _| reply + &self.read_reply())
+            }
+            _ => panic!("not a reply: {line:?}"),
+        }
+    }
+
+    /// Sends a command over and over until the reply is the one expected.
+    ///
+    /// A replica is told what changed on a connection of its own, so a client
+    /// asking about it may be asking before word has reached it.
+    pub fn expect_reply_eventually(&mut self, command: &[&str], expected: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        loop {
+            self.send(command);
+            let reply = self.read_reply();
+
+            if reply == expected {
+                return;
+            }
+            assert!(Instant::now() < deadline, "still answering {reply:?}");
+
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Reads a file, which is laid out like a bulk string but for the CRLF it
     /// does not end in.
     pub fn read_file(&mut self) -> Vec<u8> {
