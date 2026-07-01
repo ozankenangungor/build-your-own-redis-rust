@@ -162,3 +162,71 @@ fn says_so_when_the_master_goes_away() {
         replica.logs(),
     );
 }
+
+#[test]
+fn says_how_far_it_has_got_when_asked() {
+    let master = FakeMaster::start();
+    let (_replica, mut conversation) = following(&master);
+
+    conversation.send(&["REPLCONF", "GETACK", "*"]);
+
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+}
+
+#[test]
+fn says_how_far_it_has_got_however_the_asking_is_spelled() {
+    let master = FakeMaster::start();
+    let (_replica, mut conversation) = following(&master);
+
+    for asking in [
+        vec!["REPLCONF", "GETACK", "*"],
+        vec!["replconf", "getack", "*"],
+        vec!["ReplConf", "GetAck", "*"],
+    ] {
+        conversation.send(&asking);
+        conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+    }
+}
+
+#[test]
+fn answers_nothing_but_the_asking() {
+    let master = FakeMaster::start();
+    let (_replica, mut conversation) = following(&master);
+
+    conversation.send(&["SET", "foo", "1"]);
+    conversation.send(&["PING"]);
+    conversation.send(&["REPLCONF", "GETACK", "*"]);
+
+    // Only the one reply, with nothing of the two commands before it.
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+    conversation.expect_silence();
+}
+
+#[test]
+fn goes_on_taking_commands_in_after_being_asked() {
+    let master = FakeMaster::start();
+    let (replica, mut conversation) = following(&master);
+
+    conversation.send(&["SET", "before", "1"]);
+    conversation.send(&["REPLCONF", "GETACK", "*"]);
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+    conversation.send(&["SET", "after", "2"]);
+
+    let mut client = replica.connect();
+    client.expect_reply_eventually(&["GET", "before"], "$1\r\n1\r\n");
+    client.expect_reply_eventually(&["GET", "after"], "$1\r\n2\r\n");
+}
+
+#[test]
+fn keeps_the_asking_out_of_its_own_store() {
+    let master = FakeMaster::start();
+    let (replica, mut conversation) = following(&master);
+
+    conversation.send(&["REPLCONF", "GETACK", "*"]);
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+
+    // Being asked is not something to carry out, so nothing of it is left.
+    let mut client = replica.connect();
+    client.send(&["TYPE", "REPLCONF"]);
+    client.expect_reply("+none\r\n");
+}

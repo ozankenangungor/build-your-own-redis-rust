@@ -133,8 +133,8 @@ impl Conversation {
     /// Takes in what the master is told to change, for as long as it keeps
     /// telling.
     ///
-    /// None of it is answered: the master is not waiting on a reply, and one
-    /// sent would be read as something else entirely.
+    /// Only one thing is ever said back. The master is not waiting on replies,
+    /// and one sent unasked would be read as something else entirely.
     async fn keep_up(&mut self, store: Store, server: &Server) -> Result<()> {
         // A master could open a transaction as any client could, so the
         // connection keeps one the way every other connection does.
@@ -142,6 +142,19 @@ impl Conversation {
 
         loop {
             let command = self.hear().await?;
+
+            // Asked how far it has got, a replica says so. This is the one
+            // command it answers rather than carries out.
+            if asks_how_far(&command) {
+                // Counting the bytes taken in is still to come, so there is
+                // nothing yet to report but the beginning.
+                self.stream
+                    .write_all(&as_command(&["REPLCONF", "ACK", "0"]).encode())
+                    .await?;
+
+                continue;
+            }
+
             commands::run(command, &store, &mut transaction, server).await;
         }
     }
@@ -174,6 +187,19 @@ fn file_header(heard: &[u8]) -> Result<Option<(usize, usize)>> {
     Ok(Some((str::from_utf8(length)?.parse()?, end + 2)))
 }
 
+/// Whether the master is asking the replica how much of the stream it has
+/// taken in, rather than telling it something.
+fn asks_how_far(command: &Value) -> bool {
+    let Value::Array(parts) = command else {
+        return false;
+    };
+    let [Value::BulkString(name), Value::BulkString(option), ..] = parts.as_slice() else {
+        return false;
+    };
+
+    name.eq_ignore_ascii_case(b"REPLCONF") && option.eq_ignore_ascii_case(b"GETACK")
+}
+
 /// Lays a command out the way clients send them, as an array of bulk strings.
 fn as_command(parts: &[&str]) -> Value {
     Value::Array(
@@ -191,6 +217,24 @@ mod tests {
     #[test]
     fn lays_out_a_command_as_clients_send_them() {
         assert_eq!(as_command(&["PING"]).encode(), b"*1\r\n$4\r\nPING\r\n");
+    }
+
+    #[test]
+    fn knows_when_it_is_being_asked_how_far_it_has_got() {
+        assert!(asks_how_far(&as_command(&["REPLCONF", "GETACK", "*"])));
+        assert!(asks_how_far(&as_command(&["replconf", "getack", "*"])));
+    }
+
+    #[test]
+    fn knows_the_rest_is_to_be_carried_out_rather_than_answered() {
+        for command in [
+            vec!["REPLCONF", "listening-port", "6380"],
+            vec!["SET", "key", "value"],
+            vec!["PING"],
+            vec!["REPLCONF"],
+        ] {
+            assert!(!asks_how_far(&as_command(&command)), "{command:?}");
+        }
     }
 
     #[test]
