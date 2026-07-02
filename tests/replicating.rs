@@ -168,9 +168,74 @@ fn says_how_far_it_has_got_when_asked() {
     let master = FakeMaster::start();
     let (_replica, mut conversation) = following(&master);
 
+    // Nothing has come before, so it has got nowhere yet.
     conversation.send(&["REPLCONF", "GETACK", "*"]);
 
     conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+}
+
+#[test]
+fn counts_the_asking_itself_towards_how_far_it_has_got() {
+    let master = FakeMaster::start();
+    let (_replica, mut conversation) = following(&master);
+
+    // A `REPLCONF GETACK *` is 37 bytes on the wire, and counts like anything
+    // else the master sends, only not until it has been answered.
+    conversation.send(&["REPLCONF", "GETACK", "*"]);
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+
+    conversation.send(&["REPLCONF", "GETACK", "*"]);
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$2\r\n37\r\n");
+
+    conversation.send(&["REPLCONF", "GETACK", "*"]);
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$2\r\n74\r\n");
+}
+
+#[test]
+fn counts_what_it_was_told_that_changed_nothing() {
+    let master = FakeMaster::start();
+    let (_replica, mut conversation) = following(&master);
+
+    // A master sends these to show it is still there. They change nothing and
+    // are counted all the same.
+    conversation.send(&["PING"]);
+    conversation.send(&["REPLCONF", "GETACK", "*"]);
+
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$2\r\n14\r\n");
+}
+
+#[test]
+fn counts_everything_the_master_sent_in_the_order_it_came() {
+    let master = FakeMaster::start();
+    let (_replica, mut conversation) = following(&master);
+
+    conversation.send(&["REPLCONF", "GETACK", "*"]);
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+
+    conversation.send(&["PING"]);
+    conversation.send(&["REPLCONF", "GETACK", "*"]);
+    // 37 for the asking already answered, and 14 for the PING.
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$2\r\n51\r\n");
+
+    conversation.send(&["SET", "foo", "1"]);
+    conversation.send(&["SET", "bar", "2"]);
+    conversation.send(&["REPLCONF", "GETACK", "*"]);
+    // 51, another 37 for the second asking, and 29 for each SET.
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$3\r\n146\r\n");
+}
+
+#[test]
+fn counts_commands_that_arrived_together() {
+    let master = FakeMaster::start();
+    let (_replica, mut conversation) = following(&master);
+
+    // How the bytes were split across packets is nothing to do with how many
+    // of them there were.
+    conversation.send_raw(
+        b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n",
+    );
+
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$2\r\n28\r\n");
 }
 
 #[test]
@@ -178,13 +243,17 @@ fn says_how_far_it_has_got_however_the_asking_is_spelled() {
     let master = FakeMaster::start();
     let (_replica, mut conversation) = following(&master);
 
-    for asking in [
-        vec!["REPLCONF", "GETACK", "*"],
-        vec!["replconf", "getack", "*"],
-        vec!["ReplConf", "GetAck", "*"],
+    // Each asking counts towards the next answer, so what matters here is that
+    // every spelling is answered at all.
+    for (asking, offset) in [
+        (vec!["REPLCONF", "GETACK", "*"], "$1\r\n0"),
+        (vec!["replconf", "getack", "*"], "$2\r\n37"),
+        (vec!["ReplConf", "GetAck", "*"], "$2\r\n74"),
     ] {
         conversation.send(&asking);
-        conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+        conversation.expect_reply(&format!(
+            "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n{offset}\r\n"
+        ));
     }
 }
 
@@ -198,7 +267,7 @@ fn answers_nothing_but_the_asking() {
     conversation.send(&["REPLCONF", "GETACK", "*"]);
 
     // Only the one reply, with nothing of the two commands before it.
-    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$2\r\n43\r\n");
     conversation.expect_silence();
 }
 
@@ -209,7 +278,7 @@ fn goes_on_taking_commands_in_after_being_asked() {
 
     conversation.send(&["SET", "before", "1"]);
     conversation.send(&["REPLCONF", "GETACK", "*"]);
-    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+    conversation.expect_reply("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$2\r\n32\r\n");
     conversation.send(&["SET", "after", "2"]);
 
     let mut client = replica.connect();

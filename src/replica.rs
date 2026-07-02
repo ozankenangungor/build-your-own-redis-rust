@@ -93,15 +93,20 @@ impl Conversation {
     /// will say is not known in advance.
     async fn ask(&mut self, command: &[&str]) -> Result<Value> {
         self.stream.write_all(&as_command(command).encode()).await?;
-        self.hear().await
+
+        Ok(self.hear().await?.0)
     }
 
-    /// Reads one value, reading more from the master until a whole one arrives.
-    async fn hear(&mut self) -> Result<Value> {
+    /// Reads one value, reading more from the master until a whole one arrives,
+    /// along with the number of bytes it took up.
+    ///
+    /// The length is what a replica counts to say how far it has got, so it is
+    /// measured here rather than worked out again from the value.
+    async fn hear(&mut self) -> Result<(Value, u64)> {
         loop {
             if let Some((reply, consumed)) = resp::parse(&self.heard)? {
                 self.heard.advance(consumed);
-                return Ok(reply);
+                return Ok((reply, consumed as u64));
             }
 
             self.fill().await?;
@@ -139,23 +144,26 @@ impl Conversation {
         // A master could open a transaction as any client could, so the
         // connection keeps one the way every other connection does.
         let mut transaction = Transaction::default();
+        // How much of the master's stream has been taken in. Everything it
+        // sends counts, whether or not it changes anything.
+        let mut offset = 0;
 
         loop {
-            let command = self.hear().await?;
+            let (command, length) = self.hear().await?;
 
             // Asked how far it has got, a replica says so. This is the one
             // command it answers rather than carries out.
             if asks_how_far(&command) {
-                // Counting the bytes taken in is still to come, so there is
-                // nothing yet to report but the beginning.
                 self.stream
-                    .write_all(&as_command(&["REPLCONF", "ACK", "0"]).encode())
+                    .write_all(&as_command(&["REPLCONF", "ACK", &offset.to_string()]).encode())
                     .await?;
-
-                continue;
+            } else {
+                commands::run(command, &store, &mut transaction, server).await;
             }
 
-            commands::run(command, &store, &mut transaction, server).await;
+            // Counted after the fact, so that what a replica reports is how far
+            // it had got when the asking reached it.
+            offset += length;
         }
     }
 
