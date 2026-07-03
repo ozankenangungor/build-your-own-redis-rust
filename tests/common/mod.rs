@@ -86,6 +86,24 @@ impl Drop for Server {
     }
 }
 
+/// Takes a connection through the handshake a replica makes, handing back the
+/// replica's end of it, ready to be told what has changed.
+pub fn follow(server: &Server) -> Client {
+    let mut replica = server.connect();
+
+    replica.send(&["PING"]);
+    replica.expect_reply("+PONG\r\n");
+    replica.send(&["REPLCONF", "listening-port", "6380"]);
+    replica.expect_reply("+OK\r\n");
+    replica.send(&["REPLCONF", "capa", "psync2"]);
+    replica.expect_reply("+OK\r\n");
+    replica.send(&["PSYNC", "?", "-1"]);
+    replica.read_line();
+    replica.read_file();
+
+    replica
+}
+
 /// Stands in for a master, so that what a replica says to one can be read.
 pub struct FakeMaster(TcpListener);
 

@@ -2,25 +2,7 @@
 
 mod common;
 
-use common::Server;
-
-/// Takes a connection through the handshake and hands back the replica's end
-/// of it, ready to be told what changes.
-fn follow(server: &Server) -> common::Client {
-    let mut replica = server.connect();
-
-    replica.send(&["PING"]);
-    replica.expect_reply("+PONG\r\n");
-    replica.send(&["REPLCONF", "listening-port", "6380"]);
-    replica.expect_reply("+OK\r\n");
-    replica.send(&["REPLCONF", "capa", "psync2"]);
-    replica.expect_reply("+OK\r\n");
-    replica.send(&["PSYNC", "?", "-1"]);
-    replica.read_line();
-    replica.read_file();
-
-    replica
-}
+use common::{Server, follow};
 
 #[test]
 fn passes_a_write_on_to_the_replica() {
