@@ -22,6 +22,11 @@ impl Replicas {
         receiver
     }
 
+    /// How many replicas are being kept up to date.
+    pub fn count(&self) -> usize {
+        self.senders().len()
+    }
+
     /// Passes a command on to every replica, in the order they were given.
     pub fn send(&self, command: &Value) {
         let mut senders = self.senders();

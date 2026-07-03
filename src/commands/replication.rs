@@ -1,4 +1,4 @@
-use super::wrong_arity;
+use super::{not_an_integer, text, wrong_arity};
 use crate::resp::Value;
 use crate::server::Server;
 use bytes::Bytes;
@@ -45,8 +45,30 @@ pub fn run(command: &str, args: &[Bytes], server: &Server) -> Option<Value> {
             }
             _ => wrong_arity("psync"),
         },
+        // How many replicas have caught up with everything the master has been
+        // told. Waiting for them to say so is still to come: for now the
+        // answer is however many are following, which is right whenever there
+        // is nothing for them to catch up on.
+        "WAIT" => match args {
+            [replicas, timeout] => match (number(replicas), number(timeout)) {
+                (Some(_), Some(timeout)) if timeout < 0 => negative_timeout(),
+                (Some(_), Some(_)) => Value::Integer(server.replicas.count() as i64),
+                _ => not_an_integer(),
+            },
+            _ => wrong_arity("wait"),
+        },
         _ => return None,
     };
 
     Some(reply)
+}
+
+/// Reads an argument as a number, the way Redis reads the ones that count
+/// things and measure time.
+fn number(argument: &[u8]) -> Option<i64> {
+    text(argument)?.parse().ok()
+}
+
+fn negative_timeout() -> Value {
+    Value::Error("ERR timeout is negative".into())
 }

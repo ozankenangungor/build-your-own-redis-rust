@@ -24,7 +24,7 @@ redis-cli PING               # from another terminal
 | Streams | `XADD`, `XRANGE`, `XREAD` (with `BLOCK` and `$`) |
 | Keys | `TYPE` |
 | Server | `INFO` (the `replication` section) |
-| Replication | `REPLCONF`, `PSYNC` |
+| Replication | `REPLCONF`, `PSYNC`, `WAIT` |
 | Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` |
 
 Beyond the individual commands, the server:
