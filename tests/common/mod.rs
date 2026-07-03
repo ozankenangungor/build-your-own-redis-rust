@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -87,8 +87,8 @@ impl Drop for Server {
 }
 
 /// Takes a connection through the handshake a replica makes, handing back the
-/// replica's end of it, ready to be told what has changed.
-pub fn follow(server: &Server) -> Client {
+/// replica's end of it and the point in the master's history it starts from.
+pub fn follow(server: &Server) -> (Client, u64) {
     let mut replica = server.connect();
 
     replica.send(&["PING"]);
@@ -98,10 +98,62 @@ pub fn follow(server: &Server) -> Client {
     replica.send(&["REPLCONF", "capa", "psync2"]);
     replica.expect_reply("+OK\r\n");
     replica.send(&["PSYNC", "?", "-1"]);
-    replica.read_line();
+
+    let agreement = replica.read_line();
+    let from = agreement
+        .rsplit(' ')
+        .next()
+        .and_then(|offset| offset.parse().ok())
+        .unwrap_or_else(|| panic!("no offset in {agreement:?}"));
+
     replica.read_file();
 
-    replica
+    (replica, from)
+}
+
+/// Stands in for a replica that keeps up with its master: it takes in whatever
+/// it is sent and says how far it has got whenever it is asked.
+///
+/// A master only asks while a client is waiting on the answer, so this has to
+/// answer from a thread of its own.
+pub struct FakeReplica {
+    /// A second hold on the connection, kept only so that dropping the replica
+    /// hangs up on the master and stirs the thread out of its reading.
+    hangup: TcpStream,
+}
+
+impl FakeReplica {
+    pub fn follow(server: &Server) -> Self {
+        let (replica, from) = follow(server);
+        let hangup = replica
+            .0
+            .try_clone()
+            .expect("failed to hold the connection");
+
+        std::thread::spawn(move || keep_up(replica, from));
+
+        Self { hangup }
+    }
+}
+
+impl Drop for FakeReplica {
+    fn drop(&mut self) {
+        let _ = self.hangup.shutdown(Shutdown::Both);
+    }
+}
+
+/// Takes in what the master sends, counting the bytes of it, and answers each
+/// asking with how far it had got when the asking arrived.
+fn keep_up(mut replica: Client, from: u64) {
+    let mut taken_in = from;
+
+    while let Some(command) = replica.try_read_reply() {
+        if command.to_uppercase().contains("GETACK") {
+            replica.send(&["REPLCONF", "ACK", &taken_in.to_string()]);
+        }
+
+        taken_in += command.len() as u64;
+    }
 }
 
 /// Stands in for a master, so that what a replica says to one can be read.
@@ -278,6 +330,19 @@ impl Client {
             }
             _ => panic!("not a reply: {line:?}"),
         }
+    }
+
+    /// The same as `read_reply`, but hands back nothing rather than failing
+    /// when the other end has gone.
+    pub fn try_read_reply(&mut self) -> Option<String> {
+        let mut byte = [0u8; 1];
+        self.0.set_read_timeout(None).ok()?;
+        match self.0.peek(&mut byte) {
+            Ok(0) | Err(_) => return None,
+            Ok(_) => {}
+        }
+
+        Some(self.read_reply())
     }
 
     /// Sends a command over and over until the reply is the one expected.

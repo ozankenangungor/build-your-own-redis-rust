@@ -48,7 +48,7 @@ fn report(sections: &[&str], server: &Server) -> Value {
             let replication = &server.replication;
             report.push_str(&format!("role:{role}\r\n"));
             report.push_str(&format!("master_replid:{}\r\n", replication.id));
-            report.push_str(&format!("master_repl_offset:{}\r\n", replication.offset));
+            report.push_str(&format!("master_repl_offset:{}\r\n", replication.offset()));
         }
     }
 

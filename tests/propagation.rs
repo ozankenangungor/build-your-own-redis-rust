@@ -7,7 +7,7 @@ use common::{Server, follow};
 #[test]
 fn passes_a_write_on_to_the_replica() {
     let server = Server::start();
-    let mut replica = follow(&server);
+    let (mut replica, _) = follow(&server);
     let mut client = server.connect();
 
     client.send(&["SET", "foo", "1"]);
@@ -19,7 +19,7 @@ fn passes_a_write_on_to_the_replica() {
 #[test]
 fn passes_writes_on_in_the_order_they_were_made() {
     let server = Server::start();
-    let mut replica = follow(&server);
+    let (mut replica, _) = follow(&server);
     let mut client = server.connect();
 
     for (key, value) in [("foo", "1"), ("bar", "2"), ("baz", "3")] {
@@ -39,7 +39,7 @@ fn passes_writes_on_in_the_order_they_were_made() {
 #[test]
 fn passes_on_every_command_that_changes_the_store() {
     let server = Server::start();
-    let mut replica = follow(&server);
+    let (mut replica, _) = follow(&server);
     let mut client = server.connect();
 
     client.send(&["INCR", "counter"]);
@@ -58,7 +58,7 @@ fn passes_on_every_command_that_changes_the_store() {
 #[test]
 fn keeps_reads_to_itself() {
     let server = Server::start();
-    let mut replica = follow(&server);
+    let (mut replica, _) = follow(&server);
     let mut client = server.connect();
 
     // None of these leaves the store any different, so a replica copying it
@@ -80,7 +80,7 @@ fn keeps_reads_to_itself() {
 #[test]
 fn keeps_a_write_that_was_turned_down_to_itself() {
     let server = Server::start();
-    let mut replica = follow(&server);
+    let (mut replica, _) = follow(&server);
     let mut client = server.connect();
 
     client.send(&["SET", "key", "value"]);
@@ -97,7 +97,7 @@ fn keeps_a_write_that_was_turned_down_to_itself() {
 #[test]
 fn passes_on_what_a_transaction_changed() {
     let server = Server::start();
-    let mut replica = follow(&server);
+    let (mut replica, _) = follow(&server);
     let mut client = server.connect();
 
     client.send(&["MULTI"]);
@@ -133,7 +133,7 @@ fn passes_nothing_on_when_no_replica_is_following() {
 #[test]
 fn goes_on_serving_when_a_replica_hangs_up() {
     let server = Server::start();
-    let replica = follow(&server);
+    let (replica, _) = follow(&server);
     let mut client = server.connect();
 
     drop(replica);
@@ -147,7 +147,7 @@ fn goes_on_serving_when_a_replica_hangs_up() {
 #[test]
 fn passes_a_write_on_to_every_replica() {
     let server = Server::start();
-    let mut replicas: Vec<common::Client> = (0..3).map(|_| follow(&server)).collect();
+    let mut replicas: Vec<common::Client> = (0..3).map(|_| follow(&server).0).collect();
     let mut client = server.connect();
 
     for (key, value) in [("foo", "1"), ("bar", "2"), ("baz", "3")] {
@@ -171,14 +171,14 @@ fn passes_a_write_on_to_every_replica() {
 #[test]
 fn tells_a_replica_only_of_what_followed_its_arrival() {
     let server = Server::start();
-    let mut early = follow(&server);
+    let (mut early, _) = follow(&server);
     let mut client = server.connect();
 
     client.send(&["SET", "before", "1"]);
     client.expect_reply("+OK\r\n");
     early.expect_reply("*3\r\n$3\r\nSET\r\n$6\r\nbefore\r\n$1\r\n1\r\n");
 
-    let mut late = follow(&server);
+    let (mut late, _) = follow(&server);
 
     client.send(&["SET", "after", "2"]);
     client.expect_reply("+OK\r\n");
@@ -191,8 +191,8 @@ fn tells_a_replica_only_of_what_followed_its_arrival() {
 #[test]
 fn goes_on_telling_the_others_when_one_replica_hangs_up() {
     let server = Server::start();
-    let mut staying = follow(&server);
-    let leaving = follow(&server);
+    let (mut staying, _) = follow(&server);
+    let (leaving, _) = follow(&server);
     let mut client = server.connect();
 
     drop(leaving);

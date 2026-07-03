@@ -108,7 +108,8 @@ async fn dispatch(
         && !matches!(reply, Value::Error(_))
         && server.config.replicaof.is_none()
     {
-        server.replicas.send(&command.as_sent());
+        let passed_on = server.replicas.send(&command.as_sent());
+        server.replication.advance(passed_on);
     }
 
     reply
@@ -145,7 +146,7 @@ async fn run_against(
     if let Some(reply) = info::run(uppercased, args, server) {
         return reply;
     }
-    if let Some(reply) = replication::run(uppercased, args, server) {
+    if let Some(reply) = replication::run(uppercased, args, server).await {
         return reply;
     }
 

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::Server;
+use common::{FakeReplica, Server};
 
 #[test]
 fn waits_for_no_one_when_no_replica_is_following() {
@@ -30,7 +30,7 @@ fn answers_at_once_however_many_replicas_are_asked_for() {
 }
 
 #[test]
-fn counts_no_replicas_after_a_write() {
+fn waits_the_time_out_for_replicas_that_are_not_there() {
     let server = Server::start();
     let mut client = server.connect();
 
@@ -90,7 +90,7 @@ fn accepts_any_casing_of_wait() {
 #[test]
 fn counts_the_replicas_that_are_following() {
     let server = Server::start();
-    let _replicas: Vec<common::Client> = (0..3).map(|_| common::follow(&server)).collect();
+    let _replicas: Vec<common::Client> = (0..3).map(|_| common::follow(&server).0).collect();
     let mut client = server.connect();
 
     client.send(&["WAIT", "3", "500"]);
@@ -100,7 +100,7 @@ fn counts_the_replicas_that_are_following() {
 #[test]
 fn counts_them_all_however_few_are_asked_for() {
     let server = Server::start();
-    let _replicas: Vec<common::Client> = (0..3).map(|_| common::follow(&server)).collect();
+    let _replicas: Vec<common::Client> = (0..3).map(|_| common::follow(&server).0).collect();
     let mut client = server.connect();
 
     // Nothing has been sent for them to catch up on, so all of them are as
@@ -114,7 +114,7 @@ fn counts_them_all_however_few_are_asked_for() {
 #[test]
 fn answers_at_once_when_there_is_nothing_to_catch_up_on() {
     let server = Server::start();
-    let _replicas: Vec<common::Client> = (0..2).map(|_| common::follow(&server)).collect();
+    let _replicas: Vec<common::Client> = (0..2).map(|_| common::follow(&server).0).collect();
     let mut client = server.connect();
 
     let started = std::time::Instant::now();
@@ -126,36 +126,106 @@ fn answers_at_once_when_there_is_nothing_to_catch_up_on() {
 }
 
 #[test]
-fn stops_counting_a_replica_that_has_gone() {
+fn counts_the_replica_that_has_caught_up_with_a_write() {
     let server = Server::start();
-    let staying = common::follow(&server);
-    let leaving = common::follow(&server);
+    let _replica = FakeReplica::follow(&server);
     let mut client = server.connect();
 
-    client.send(&["WAIT", "2", "100"]);
+    client.send(&["SET", "foo", "123"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WAIT", "1", "500"]);
+    client.expect_reply(":1\r\n");
+}
+
+#[test]
+fn counts_every_replica_that_has_caught_up() {
+    let server = Server::start();
+    let _replicas: Vec<FakeReplica> = (0..3).map(|_| FakeReplica::follow(&server)).collect();
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "123"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["WAIT", "3", "500"]);
+    client.expect_reply(":3\r\n");
+}
+
+#[test]
+fn answers_as_soon_as_enough_replicas_have_caught_up() {
+    let server = Server::start();
+    let _replicas: Vec<FakeReplica> = (0..2).map(|_| FakeReplica::follow(&server)).collect();
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "123"]);
+    client.expect_reply("+OK\r\n");
+
+    let started = std::time::Instant::now();
+
+    client.send(&["WAIT", "2", "5000"]);
+    client.expect_reply(":2\r\n");
+
+    // Waiting the timeout out when the answer is already known would be
+    // waiting for nothing.
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn counts_only_the_replicas_that_answered_before_the_time_was_up() {
+    let server = Server::start();
+    let _keeping_up = FakeReplica::follow(&server);
+    // This one takes what it is sent and never says a word about it.
+    let _silent = common::follow(&server).0;
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "123"]);
+    client.expect_reply("+OK\r\n");
+
+    let started = std::time::Instant::now();
+
+    client.send(&["WAIT", "2", "300"]);
+    client.expect_reply(":1\r\n");
+
+    // The one that never answers is waited for, and only for as long as asked.
+    assert!(started.elapsed() >= std::time::Duration::from_millis(300));
+}
+
+#[test]
+fn counts_them_afresh_for_each_write_it_is_asked_about() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    let _first = FakeReplica::follow(&server);
+    client.send(&["SET", "foo", "123"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["WAIT", "1", "500"]);
+    client.expect_reply(":1\r\n");
+
+    let _second = FakeReplica::follow(&server);
+    client.send(&["SET", "bar", "456"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["WAIT", "2", "500"]);
+    client.expect_reply(":2\r\n");
+}
+
+#[test]
+fn stops_counting_a_replica_that_has_gone() {
+    let server = Server::start();
+    let _staying = FakeReplica::follow(&server);
+    let leaving = FakeReplica::follow(&server);
+    let mut client = server.connect();
+
+    client.send(&["SET", "key", "value"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["WAIT", "2", "500"]);
     client.expect_reply(":2\r\n");
 
     drop(leaving);
 
-    // A replica that has gone is only found to be gone when a write to it
-    // fails, and the first write after it left may still be taken by the
-    // operating system, so this takes as long as it takes.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        client.send(&["SET", "key", "value"]);
-        client.expect_reply("+OK\r\n");
-
-        client.send(&["WAIT", "2", "100"]);
-        let counted = client.read_reply();
-
-        if counted == ":1\r\n" {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "still counting {counted:?}",
-        );
-    }
-
-    drop(staying);
+    // Hanging up is heard on the connection, so the one left is the one
+    // counted from here on.
+    client.send(&["SET", "key", "again"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["WAIT", "2", "300"]);
+    client.expect_reply(":1\r\n");
 }

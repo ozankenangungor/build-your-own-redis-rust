@@ -40,10 +40,17 @@ pub async fn follow(master: &Master, port: u16, store: Store, server: &Server) -
     let Value::SimpleString(agreement) = &reply else {
         bail!("asked to sync and heard {reply:?}");
     };
+    // The master names the history it is handing over and how far along that
+    // history the handover is. What comes next carries on from there, so that
+    // is where this replica starts counting.
+    let [_, _history, from] = agreement.split(' ').collect::<Vec<_>>()[..] else {
+        bail!("asked to sync and was told '{agreement}'");
+    };
     ensure!(
         agreement.starts_with("FULLRESYNC"),
         "asked to sync and was told '{agreement}'",
     );
+    let from: u64 = from.parse()?;
 
     // What follows the agreement is the master's whole dataset. It is always
     // empty for now, so there is nothing in it to take on.
@@ -56,7 +63,7 @@ pub async fn follow(master: &Master, port: u16, store: Store, server: &Server) -
         dataset.len(),
     );
 
-    conversation.keep_up(store, server).await
+    conversation.keep_up(from, store, server).await
 }
 
 /// One replica talking to one master, a command at a time.
@@ -140,13 +147,14 @@ impl Conversation {
     ///
     /// Only one thing is ever said back. The master is not waiting on replies,
     /// and one sent unasked would be read as something else entirely.
-    async fn keep_up(&mut self, store: Store, server: &Server) -> Result<()> {
+    async fn keep_up(&mut self, from: u64, store: Store, server: &Server) -> Result<()> {
         // A master could open a transaction as any client could, so the
         // connection keeps one the way every other connection does.
         let mut transaction = Transaction::default();
-        // How much of the master's stream has been taken in. Everything it
-        // sends counts, whether or not it changes anything.
-        let mut offset = 0;
+        // How far along the master's history this replica is. It starts where
+        // the handover left off, so that what it reports and what the master
+        // counts are the same numbers.
+        let mut offset = from;
 
         loop {
             let (command, length) = self.hear().await?;

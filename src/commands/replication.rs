@@ -2,6 +2,7 @@ use super::{not_an_integer, text, wrong_arity};
 use crate::resp::Value;
 use crate::server::Server;
 use bytes::Bytes;
+use std::time::{Duration, Instant};
 
 /// A dataset holding nothing, in the format Redis saves its data in.
 ///
@@ -13,7 +14,7 @@ const EMPTY_DATASET: &[u8] = b"REDIS0011\xff\0\0\0\0\0\0\0\0";
 
 /// Handles the commands replicas send their master. `None` means the command
 /// belongs to another module.
-pub fn run(command: &str, args: &[Bytes], server: &Server) -> Option<Value> {
+pub async fn run(command: &str, args: &[Bytes], server: &Server) -> Option<Value> {
     let reply = match command {
         // A replica introduces itself in pairs of a setting and its value. None
         // of them changes how this server answers yet, so all that is checked
@@ -38,7 +39,8 @@ pub fn run(command: &str, args: &[Bytes], server: &Server) -> Option<Value> {
                 Value::Sequence(vec![
                     Value::SimpleString(format!(
                         "FULLRESYNC {} {}",
-                        replication.id, replication.offset
+                        replication.id,
+                        replication.offset()
                     )),
                     Value::File(Bytes::from_static(EMPTY_DATASET)),
                 ])
@@ -46,13 +48,15 @@ pub fn run(command: &str, args: &[Bytes], server: &Server) -> Option<Value> {
             _ => wrong_arity("psync"),
         },
         // How many replicas have caught up with everything the master has been
-        // told. Waiting for them to say so is still to come: for now the
-        // answer is however many are following, which is right whenever there
-        // is nothing for them to catch up on.
+        // told, waiting a while for them to say so.
         "WAIT" => match args {
             [replicas, timeout] => match (number(replicas), number(timeout)) {
                 (Some(_), Some(timeout)) if timeout < 0 => negative_timeout(),
-                (Some(_), Some(_)) => Value::Integer(server.replicas.count() as i64),
+                (Some(wanted), Some(timeout)) => {
+                    let caught_up = wait(server, wanted, timeout as u64).await;
+
+                    Value::Integer(caught_up as i64)
+                }
                 _ => not_an_integer(),
             },
             _ => wrong_arity("wait"),
@@ -61,6 +65,56 @@ pub fn run(command: &str, args: &[Bytes], server: &Server) -> Option<Value> {
     };
 
     Some(reply)
+}
+
+/// Waits for `wanted` replicas to have taken in everything this master has
+/// passed on, giving up after `timeout` milliseconds.
+///
+/// What is waited for is settled first: replicas that catch up with commands
+/// sent after the waiting began are neither here nor there.
+async fn wait(server: &Server, wanted: i64, timeout: u64) -> usize {
+    let target = server.replication.offset();
+
+    // With nothing yet handed out there is nothing to catch up on, so every
+    // replica there is has caught up by definition.
+    if target == 0 {
+        return server.replicas.count();
+    }
+
+    // Replicas say how far they have got only when asked, and a replica with
+    // nothing to do would otherwise never say.
+    let asked = server
+        .replicas
+        .send(&as_command(&["REPLCONF", "GETACK", "*"]));
+    server.replication.advance(asked);
+
+    let deadline = Instant::now() + Duration::from_millis(timeout);
+
+    loop {
+        // Made before the count is taken, so that word arriving in between is
+        // waited on rather than missed.
+        let stirred = server.replicas.stirred();
+
+        let caught_up = server.replicas.caught_up_to(target);
+        if caught_up as i64 >= wanted {
+            return caught_up;
+        }
+
+        let left = deadline.saturating_duration_since(Instant::now());
+        if tokio::time::timeout(left, stirred).await.is_err() {
+            return server.replicas.caught_up_to(target);
+        }
+    }
+}
+
+/// Lays a command out the way clients send them, as an array of bulk strings.
+fn as_command(parts: &[&str]) -> Value {
+    Value::Array(
+        parts
+            .iter()
+            .map(|part| Value::BulkString(Bytes::copy_from_slice(part.as_bytes())))
+            .collect(),
+    )
 }
 
 /// Reads an argument as a number, the way Redis reads the ones that count

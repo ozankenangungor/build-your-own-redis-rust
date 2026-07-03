@@ -6,6 +6,8 @@ use crate::{commands, resp};
 use anyhow::Result;
 use bytes::{Buf, Bytes, BytesMut};
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -54,7 +56,9 @@ pub async fn serve(
                     // Taking on the replica before returning means no change
                     // can slip through between the dataset going out and the
                     // connection starting to carry them.
-                    return keep_up_to_date(stream, server.replicas.add()).await;
+                    let (changes, reached) = server.replicas.add();
+
+                    return keep_up_to_date(stream, changes, reached, server).await;
                 }
             }
         }
@@ -64,14 +68,60 @@ pub async fn serve(
 /// Passes on everything the master is told to change, for as long as the
 /// replica is there to hear it.
 ///
-/// A replica says nothing back, so this only ever writes.
+/// A replica says only one thing back, and only when asked: how far along the
+/// stream it has got. Listening for it is also how a replica that has gone
+/// away is found out.
 async fn keep_up_to_date(
     mut stream: TcpStream,
     mut changes: mpsc::UnboundedReceiver<Bytes>,
+    reached: Arc<AtomicU64>,
+    server: &Server,
 ) -> Result<()> {
-    while let Some(change) = changes.recv().await {
-        stream.write_all(&change).await?;
+    let mut heard = BytesMut::with_capacity(64);
+
+    loop {
+        tokio::select! {
+            change = changes.recv() => {
+                let Some(change) = change else {
+                    return Ok(());
+                };
+
+                stream.write_all(&change).await?;
+            }
+            read = stream.read_buf(&mut heard) => {
+                if read? == 0 {
+                    return Ok(());
+                }
+
+                while let Some((said, consumed)) = resp::parse(&heard)? {
+                    heard.advance(consumed);
+
+                    if let Some(offset) = how_far(&said) {
+                        server.replicas.reached(&reached, offset);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Reads how far a replica says it has got, out of what it said back.
+fn how_far(said: &Value) -> Option<u64> {
+    let Value::Array(parts) = said else {
+        return None;
+    };
+    let [
+        Value::BulkString(name),
+        Value::BulkString(ack),
+        Value::BulkString(offset),
+    ] = parts.as_slice()
+    else {
+        return None;
+    };
+
+    if !name.eq_ignore_ascii_case(b"REPLCONF") || !ack.eq_ignore_ascii_case(b"ACK") {
+        return None;
     }
 
-    Ok(())
+    str::from_utf8(offset).ok()?.parse().ok()
 }
