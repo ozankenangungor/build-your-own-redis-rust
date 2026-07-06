@@ -255,6 +255,12 @@ impl Client {
         self.send_raw(&request);
     }
 
+    /// Sends bytes without minding whether they all get through, for input the
+    /// server is meant to turn away part way into.
+    pub fn try_send_raw(&mut self, bytes: &[u8]) {
+        let _ = self.0.write_all(bytes);
+    }
+
     pub fn send_raw(&mut self, bytes: &[u8]) {
         self.0.write_all(bytes).expect("failed to send command");
     }
