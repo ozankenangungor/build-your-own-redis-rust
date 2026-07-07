@@ -28,10 +28,27 @@ struct Replica {
     reached: Arc<AtomicU64>,
 }
 
+/// One replica's end of things, held by the connection that carries it: the
+/// changes to write out, and the way to say how far the replica has got.
+pub struct Following {
+    pub changes: mpsc::UnboundedReceiver<Bytes>,
+    reached: Arc<AtomicU64>,
+    replicas: Replicas,
+}
+
+impl Following {
+    /// Notes how far the replica says it has got, and wakes whoever is waiting
+    /// on that news.
+    pub fn reached(&self, offset: u64) {
+        self.reached.store(offset, Ordering::Relaxed);
+        self.replicas.0.stirred.notify_waiters();
+    }
+}
+
 impl Replicas {
-    /// Takes on a replica, handing back the end of the queue its connection is
-    /// to write out, and where that connection is to note how far it has got.
-    pub fn add(&self) -> (mpsc::UnboundedReceiver<Bytes>, Arc<AtomicU64>) {
+    /// Takes on a replica, handing back what its connection needs to keep it
+    /// up to date.
+    pub fn add(&self) -> Following {
         let (changes, receiver) = mpsc::unbounded_channel();
         let reached = Arc::new(AtomicU64::new(0));
 
@@ -40,7 +57,11 @@ impl Replicas {
             reached: Arc::clone(&reached),
         });
 
-        (receiver, reached)
+        Following {
+            changes: receiver,
+            reached,
+            replicas: self.clone(),
+        }
     }
 
     /// How many replicas are being kept up to date.
@@ -56,13 +77,6 @@ impl Replicas {
             .count()
     }
 
-    /// Notes how far a replica says it has got, and wakes whoever is waiting on
-    /// that news.
-    pub fn reached(&self, replica: &AtomicU64, offset: u64) {
-        replica.store(offset, Ordering::Relaxed);
-        self.0.stirred.notify_waiters();
-    }
-
     /// Waits for a replica to say how far it has got.
     ///
     /// The future is made before the count is looked at, so that news arriving
@@ -74,23 +88,32 @@ impl Replicas {
     /// Passes a command on to every replica, in the order they were given, and
     /// says how many bytes of the stream it took up.
     pub fn send(&self, command: &Value) -> u64 {
-        let mut following = self.following();
+        let following = self.following();
         if following.is_empty() {
             return 0;
         }
 
         let encoded = Bytes::from(command.encode());
-        // A replica whose connection has ended is dropped rather than kept and
-        // written to for as long as the master runs.
-        following.retain(|replica| replica.changes.send(encoded.clone()).is_ok());
+        for replica in following.iter() {
+            // A send that fails is one whose connection has just ended, and it
+            // is dropped from the list on the next look at it.
+            let _ = replica.changes.send(encoded.clone());
+        }
 
         encoded.len() as u64
     }
 
+    /// The replicas still being followed, without the ones whose connections
+    /// have ended: those are no more use to a `WAIT` than to a write.
     fn following(&self) -> MutexGuard<'_, Vec<Replica>> {
-        self.0
+        let mut following = self
+            .0
             .following
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        following.retain(|replica| !replica.changes.is_closed());
+
+        following
     }
 }

@@ -1,16 +1,14 @@
 use crate::commands::{Answer, Transaction};
+use crate::replicas::Following;
 use crate::resp::Value;
 use crate::server::Server;
 use crate::store::Store;
 use crate::{commands, resp};
 use anyhow::Result;
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BytesMut};
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 
 /// Reads commands from one client until it goes away, replying to each.
 pub async fn serve(
@@ -56,9 +54,9 @@ pub async fn serve(
                     // Taking on the replica before returning means no change
                     // can slip through between the dataset going out and the
                     // connection starting to carry them.
-                    let (changes, reached) = server.replicas.add();
-
-                    return keep_up_to_date(stream, changes, reached, server).await;
+                    // Whatever was read past the request has still to be made
+                    // sense of, and may already hold a word from the replica.
+                    return keep_up_to_date(stream, buf, server.replicas.add()).await;
                 }
             }
         }
@@ -73,15 +71,22 @@ pub async fn serve(
 /// away is found out.
 async fn keep_up_to_date(
     mut stream: TcpStream,
-    mut changes: mpsc::UnboundedReceiver<Bytes>,
-    reached: Arc<AtomicU64>,
-    server: &Server,
+    mut heard: BytesMut,
+    mut following: Following,
 ) -> Result<()> {
-    let mut heard = BytesMut::with_capacity(64);
-
     loop {
+        // Anything left over from before is made sense of first, since nothing
+        // more may ever arrive to prompt another look at it.
+        while let Some((said, consumed)) = resp::parse(&heard)? {
+            heard.advance(consumed);
+
+            if let Some(offset) = how_far(&said) {
+                following.reached(offset);
+            }
+        }
+
         tokio::select! {
-            change = changes.recv() => {
+            change = following.changes.recv() => {
                 let Some(change) = change else {
                     return Ok(());
                 };
@@ -91,14 +96,6 @@ async fn keep_up_to_date(
             read = stream.read_buf(&mut heard) => {
                 if read? == 0 {
                     return Ok(());
-                }
-
-                while let Some((said, consumed)) = resp::parse(&heard)? {
-                    heard.advance(consumed);
-
-                    if let Some(offset) = how_far(&said) {
-                        server.replicas.reached(&reached, offset);
-                    }
                 }
             }
         }
