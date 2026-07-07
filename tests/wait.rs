@@ -229,3 +229,67 @@ fn stops_counting_a_replica_that_has_gone() {
     client.send(&["WAIT", "2", "300"]);
     client.expect_reply(":1\r\n");
 }
+
+#[test]
+fn waits_however_long_it_takes_when_given_no_time_at_all() {
+    let server = Server::start();
+    let _replica = FakeReplica::follow(&server);
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "123"]);
+    client.expect_reply("+OK\r\n");
+
+    // No time at all is Redis's way of saying however long it takes, and what
+    // it takes here is one round trip.
+    client.send(&["WAIT", "1", "0"]);
+    client.expect_reply(":1\r\n");
+}
+
+#[test]
+fn goes_on_waiting_when_given_no_time_and_no_answer() {
+    let server = Server::start();
+    let _keeping_up = FakeReplica::follow(&server);
+    let _silent = common::follow(&server).0;
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "123"]);
+    client.expect_reply("+OK\r\n");
+
+    // One of the two will never answer, so this waits for good rather than
+    // giving up and saying one.
+    client.send(&["WAIT", "2", "0"]);
+    client.expect_silence();
+}
+
+#[test]
+fn takes_in_what_a_replica_said_alongside_its_request() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "123"]);
+    client.expect_reply("+OK\r\n");
+
+    let mut replica = server.connect();
+    replica.send(&["PING"]);
+    replica.expect_reply("+PONG\r\n");
+
+    // Both in one packet, so the word about how far it has got arrives in the
+    // same read as the request that makes it a replica.
+    replica.send_raw(
+        b"*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n\
+          *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$5\r\n10000\r\n",
+    );
+    replica.read_line();
+    replica.read_file();
+
+    client.send(&["SET", "bar", "456"]);
+    client.expect_reply("+OK\r\n");
+
+    // Were that word dropped along with the rest of the read, this would wait
+    // the timeout out and answer nothing.
+    let started = std::time::Instant::now();
+    client.send(&["WAIT", "1", "1000"]);
+    client.expect_reply(":1\r\n");
+
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+}

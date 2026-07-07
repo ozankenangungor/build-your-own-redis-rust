@@ -88,7 +88,11 @@ async fn wait(server: &Server, wanted: i64, timeout: u64) -> usize {
         .send(&as_command(&["REPLCONF", "GETACK", "*"]));
     server.replication.advance(asked);
 
-    let deadline = Instant::now() + Duration::from_millis(timeout);
+    // No time at all is Redis's way of saying however long it takes.
+    let deadline = match timeout {
+        0 => None,
+        milliseconds => Some(Instant::now() + Duration::from_millis(milliseconds)),
+    };
 
     loop {
         // Made before the count is taken, so that word arriving in between is
@@ -99,6 +103,11 @@ async fn wait(server: &Server, wanted: i64, timeout: u64) -> usize {
         if caught_up as i64 >= wanted {
             return caught_up;
         }
+
+        let Some(deadline) = deadline else {
+            stirred.await;
+            continue;
+        };
 
         let left = deadline.saturating_duration_since(Instant::now());
         if tokio::time::timeout(left, stirred).await.is_err() {
