@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use tokio::sync::oneshot;
 
 /// The end of a list a command works from.
+#[derive(Clone, Copy)]
 pub enum Side {
     Left,
     Right,

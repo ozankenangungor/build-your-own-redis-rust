@@ -43,13 +43,12 @@ pub async fn follow(master: &Master, port: u16, store: Store, server: &Server) -
     // The master names the history it is handing over and how far along that
     // history the handover is. What comes next carries on from there, so that
     // is where this replica starts counting.
-    let [_, _history, from] = agreement.split(' ').collect::<Vec<_>>()[..] else {
+    let handover = agreement
+        .strip_prefix("FULLRESYNC ")
+        .and_then(|handover| handover.split_once(' '));
+    let Some((_history, from)) = handover else {
         bail!("asked to sync and was told '{agreement}'");
     };
-    ensure!(
-        agreement.starts_with("FULLRESYNC"),
-        "asked to sync and was told '{agreement}'",
-    );
     let from: u64 = from.parse()?;
 
     // What follows the agreement is the master's whole dataset. It is always

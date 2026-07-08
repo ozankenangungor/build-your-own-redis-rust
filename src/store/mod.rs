@@ -23,6 +23,7 @@ pub struct Store(Arc<Mutex<State>>);
 pub struct WrongType;
 
 /// The kind of value a key holds, or `None` when there is no such key.
+#[derive(Clone, Copy)]
 pub enum Kind {
     None,
     String,
