@@ -2,6 +2,7 @@ mod info;
 mod keys;
 mod lists;
 mod replication;
+mod settings;
 mod streams;
 mod strings;
 mod transactions;
@@ -144,6 +145,9 @@ async fn run_against(
         return reply;
     }
     if let Some(reply) = info::run(uppercased, args, server) {
+        return reply;
+    }
+    if let Some(reply) = settings::run(uppercased, args, server) {
         return reply;
     }
     if let Some(reply) = replication::run(uppercased, args, server).await {
