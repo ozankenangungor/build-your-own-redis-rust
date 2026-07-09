@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod connection;
+mod glob;
 mod replica;
 mod replicas;
 mod resp;
@@ -18,8 +19,9 @@ use tokio::net::TcpListener;
 async fn main() -> Result<()> {
     let server = Arc::new(Server::new(Config::from_args()?));
 
-    let listener = TcpListener::bind(("127.0.0.1", server.config.port)).await?;
     let store = Store::default();
+
+    let listener = TcpListener::bind(("127.0.0.1", server.config.port)).await?;
 
     // Port zero leaves the choice to the operating system, so the port that was
     // settled on is the one to report, and the one to tell a master about.

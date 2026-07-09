@@ -71,6 +71,23 @@ impl Store {
         }
     }
 
+    /// The keys this store holds that `wanted` asks for.
+    ///
+    /// Every key is looked at either way, which makes this the moment to be rid
+    /// of the ones whose time has passed: a key that has expired is no longer
+    /// there to be listed.
+    pub fn keys(&self, wanted: impl Fn(&Bytes) -> bool) -> Vec<Bytes> {
+        let mut state = self.state();
+        state.entries.retain(|_, entry| !entry.has_expired());
+
+        state
+            .entries
+            .keys()
+            .filter(|key| wanted(key))
+            .cloned()
+            .collect()
+    }
+
     /// The versions these keys hold now, for a client that wants to be told
     /// should any of them change. `None` means there is no such key, which is a
     /// state of its own: a key that appears later has changed just as surely as
