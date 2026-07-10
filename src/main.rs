@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod connection;
 mod glob;
+mod rdb;
 mod replica;
 mod replicas;
 mod resp;
@@ -19,7 +20,13 @@ use tokio::net::TcpListener;
 async fn main() -> Result<()> {
     let server = Arc::new(Server::new(Config::from_args()?));
 
+    // Whatever was saved last time is where this server picks up, and it picks
+    // up before it takes a caller. A file that cannot be read is not treated as
+    // one that was never saved: coming up empty over a dataset that is there
+    // would look for all the world like the data had gone.
     let store = Store::default();
+    let loaded = rdb::load(&server.config, &store)?;
+    eprintln!("loaded {loaded} keys from the saved dataset");
 
     let listener = TcpListener::bind(("127.0.0.1", server.config.port)).await?;
 
