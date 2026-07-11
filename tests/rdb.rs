@@ -54,6 +54,17 @@ impl Drop for Saved {
 
 /// Lays out a dataset holding these keys, the way Redis saves one.
 fn dataset(entries: &[(&str, &str)]) -> Vec<u8> {
+    let entries: Vec<(&[u8], &[u8])> = entries
+        .iter()
+        .map(|(key, value)| (key.as_bytes(), value.as_bytes()))
+        .collect();
+
+    dataset_holding(&entries)
+}
+
+/// The same, for the keys and values that are not text: a saved string is a
+/// run of bytes and may hold anything at all.
+fn dataset_holding(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
     let mut file = Vec::from(*b"REDIS0011");
 
     // Written by a server that named itself, as Redis does.
@@ -69,8 +80,8 @@ fn dataset(entries: &[(&str, &str)]) -> Vec<u8> {
     for (key, value) in entries {
         file.push(0x00);
         for part in [key, value] {
-            file.push(part.len() as u8);
-            file.extend_from_slice(part.as_bytes());
+            file.extend_from_slice(&length(part.len()));
+            file.extend_from_slice(part);
         }
     }
 
@@ -78,6 +89,16 @@ fn dataset(entries: &[(&str, &str)]) -> Vec<u8> {
     file.extend_from_slice(&[0; 8]);
 
     file
+}
+
+/// A length, in the fewest bytes it fits in. Six bits hold anything up to 63;
+/// past that the top two bits say that eight more follow.
+fn length(length: usize) -> Vec<u8> {
+    match length {
+        0..=63 => vec![length as u8],
+        64..=16383 => vec![0x40 | (length >> 8) as u8, (length & 0xff) as u8],
+        _ => panic!("no test saves a string that long"),
+    }
 }
 
 /// The same, for a key saved with a time on it.
@@ -141,6 +162,79 @@ fn holds_what_the_saved_key_held() {
 
     client.send(&["GET", "foo"]);
     client.expect_reply("$3\r\nbar\r\n");
+}
+
+#[test]
+fn holds_a_saved_value_too_long_for_a_six_bit_length() {
+    // Past 63 bytes a string is saved with its length spread over two bytes,
+    // which is a different path through the reading.
+    let value = "v".repeat(300);
+    let saved = Saved::new(&dataset(&[("foo", &value)]));
+    let server = saved.server();
+    let mut client = server.connect();
+
+    client.send(&["GET", "foo"]);
+    client.expect_reply(&format!("$300\r\n{value}\r\n"));
+}
+
+#[test]
+fn holds_a_saved_value_that_is_not_text() {
+    // A saved string is a run of bytes and may hold anything, including the
+    // bytes the protocol itself is written in.
+    let value: &[u8] = b"\x00\xff\r\nnot text\x80";
+    let saved = Saved::new(&dataset_holding(&[(b"binary", value)]));
+    let server = saved.server();
+    let mut client = server.connect();
+
+    client.send(&["GET", "binary"]);
+    client.expect_bytes(b"$13\r\n\x00\xff\r\nnot text\x80\r\n");
+}
+
+#[test]
+fn holds_a_saved_value_of_nothing_at_all() {
+    let saved = Saved::new(&dataset(&[("empty", "")]));
+    let server = saved.server();
+    let mut client = server.connect();
+
+    // Nothing is a value like any other, and is not the same as no key.
+    client.send(&["GET", "empty"]);
+    client.expect_reply("$0\r\n\r\n");
+
+    client.send(&["GET", "missing"]);
+    client.expect_reply("$-1\r\n");
+}
+
+#[test]
+fn calls_a_saved_value_a_string() {
+    let saved = Saved::new(&dataset(&[("foo", "bar")]));
+    let server = saved.server();
+    let mut client = server.connect();
+
+    client.send(&["TYPE", "foo"]);
+    client.expect_reply("+string\r\n");
+}
+
+#[test]
+fn lets_a_saved_value_be_written_over() {
+    let saved = Saved::new(&dataset(&[("foo", "bar")]));
+    let server = saved.server();
+    let mut client = server.connect();
+
+    // A key read from a file is held no differently from one that was set.
+    client.send(&["SET", "foo", "baz"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$3\r\nbaz\r\n");
+}
+
+#[test]
+fn counts_up_from_a_saved_number() {
+    let saved = Saved::new(&dataset(&[("count", "41")]));
+    let server = saved.server();
+    let mut client = server.connect();
+
+    client.send(&["INCR", "count"]);
+    client.expect_reply(":42\r\n");
 }
 
 #[test]
