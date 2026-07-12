@@ -134,6 +134,39 @@ fn lists_the_one_key_a_saved_dataset_holds() {
 }
 
 #[test]
+fn lists_every_key_a_saved_dataset_holds() {
+    let saved = Saved::new(&dataset(&[
+        ("foo", "1"),
+        ("bar", "2"),
+        ("hello", "3"),
+        ("mango", "4"),
+    ]));
+    let server = saved.server();
+    let mut client = server.connect();
+
+    client.send(&["KEYS", "*"]);
+    let mut keys = client.read_command();
+
+    // Redis walks its table and hands back what it finds, in whatever order
+    // that turns out to be, so the listing is sorted before it is compared.
+    keys.sort();
+
+    assert_eq!(keys, ["bar", "foo", "hello", "mango"]);
+}
+
+#[test]
+fn holds_what_each_of_the_saved_keys_held() {
+    let saved = Saved::new(&dataset(&[("foo", "1"), ("bar", "2"), ("hello", "3")]));
+    let server = saved.server();
+    let mut client = server.connect();
+
+    for (key, value) in [("foo", "1"), ("bar", "2"), ("hello", "3")] {
+        client.send(&["GET", key]);
+        client.expect_reply(&format!("$1\r\n{value}\r\n"));
+    }
+}
+
+#[test]
 fn lists_nothing_when_nothing_was_ever_saved() {
     let saved = Saved::nothing();
     let server = saved.server();
