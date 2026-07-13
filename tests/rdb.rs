@@ -52,19 +52,38 @@ impl Drop for Saved {
     }
 }
 
+/// When a saved key is to go, if it is to go at all. Redis writes the time one
+/// of two ways round, and a reader has to know both.
+#[derive(Clone, Copy)]
+enum Goes {
+    Never,
+    AtSeconds(SystemTime),
+    AtMilliseconds(SystemTime),
+}
+
 /// Lays out a dataset holding these keys, the way Redis saves one.
 fn dataset(entries: &[(&str, &str)]) -> Vec<u8> {
-    let entries: Vec<(&[u8], &[u8])> = entries
+    let entries: Vec<_> = entries
         .iter()
-        .map(|(key, value)| (key.as_bytes(), value.as_bytes()))
+        .map(|(key, value)| (key.as_bytes(), value.as_bytes(), Goes::Never))
         .collect();
 
-    dataset_holding(&entries)
+    dataset_of(&entries)
 }
 
 /// The same, for the keys and values that are not text: a saved string is a
 /// run of bytes and may hold anything at all.
 fn dataset_holding(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
+    let entries: Vec<_> = entries
+        .iter()
+        .map(|&(key, value)| (key, value, Goes::Never))
+        .collect();
+
+    dataset_of(&entries)
+}
+
+/// The same, for the keys that carry a time as well as a value.
+fn dataset_of(entries: &[(&[u8], &[u8], Goes)]) -> Vec<u8> {
     let mut file = Vec::from(*b"REDIS0011");
 
     // Written by a server that named itself, as Redis does.
@@ -74,10 +93,28 @@ fn dataset_holding(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
     file.extend_from_slice(b"7.2.0");
 
     // The first database, and how much room its keys want.
+    let expiring = entries
+        .iter()
+        .filter(|(_, _, goes)| !matches!(goes, Goes::Never))
+        .count();
     file.extend_from_slice(&[0xFE, 0]);
-    file.extend_from_slice(&[0xFB, entries.len() as u8, 0]);
+    file.extend_from_slice(&[0xFB, entries.len() as u8, expiring as u8]);
 
-    for (key, value) in entries {
+    for (key, value, goes) in entries {
+        // The time comes before the kind of value, so that a reader meets it
+        // on its way to the key rather than after.
+        match goes {
+            Goes::Never => {}
+            Goes::AtSeconds(at) => {
+                file.push(0xFD);
+                file.extend_from_slice(&(since_epoch(*at) / 1000).to_le_bytes()[..4]);
+            }
+            Goes::AtMilliseconds(at) => {
+                file.push(0xFC);
+                file.extend_from_slice(&since_epoch(*at).to_le_bytes());
+            }
+        }
+
         file.push(0x00);
         for part in [key, value] {
             file.extend_from_slice(&length(part.len()));
@@ -91,6 +128,12 @@ fn dataset_holding(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
     file
 }
 
+fn since_epoch(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH)
+        .expect("a time after the epoch")
+        .as_millis() as u64
+}
+
 /// A length, in the fewest bytes it fits in. Six bits hold anything up to 63;
 /// past that the top two bits say that eight more follow.
 fn length(length: usize) -> Vec<u8> {
@@ -101,26 +144,13 @@ fn length(length: usize) -> Vec<u8> {
     }
 }
 
-/// The same, for a key saved with a time on it.
-fn dataset_expiring_at(key: &str, value: &str, at: SystemTime) -> Vec<u8> {
-    let milliseconds = at
-        .duration_since(UNIX_EPOCH)
-        .expect("a time after the epoch")
-        .as_millis() as u64;
+/// A time long past, and one far enough off that no test outlives it.
+fn long_gone() -> SystemTime {
+    SystemTime::now() - std::time::Duration::from_secs(3600)
+}
 
-    let mut file = Vec::from(*b"REDIS0011");
-
-    file.extend_from_slice(&[0xFE, 0, 0xFC]);
-    file.extend_from_slice(&milliseconds.to_le_bytes());
-    file.push(0x00);
-    for part in [key, value] {
-        file.push(part.len() as u8);
-        file.extend_from_slice(part.as_bytes());
-    }
-    file.push(0xFF);
-    file.extend_from_slice(&[0; 8]);
-
-    file
+fn far_off() -> SystemTime {
+    SystemTime::now() + std::time::Duration::from_secs(3600)
 }
 
 #[test]
@@ -328,8 +358,11 @@ fn lists_nothing_for_a_pattern_no_key_answers_to() {
 
 #[test]
 fn keeps_a_saved_key_out_of_the_listing_once_its_time_has_passed() {
-    let long_gone = UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
-    let saved = Saved::new(&dataset_expiring_at("gone", "value", long_gone));
+    let saved = Saved::new(&dataset_of(&[(
+        b"gone",
+        b"value",
+        Goes::AtMilliseconds(long_gone()),
+    )]));
     let server = saved.server();
     let mut client = server.connect();
 
@@ -342,13 +375,106 @@ fn keeps_a_saved_key_out_of_the_listing_once_its_time_has_passed() {
 
 #[test]
 fn keeps_a_saved_key_whose_time_has_yet_to_come() {
-    let far_off = SystemTime::now() + std::time::Duration::from_secs(600);
-    let saved = Saved::new(&dataset_expiring_at("later", "value", far_off));
+    let saved = Saved::new(&dataset_of(&[(
+        b"later",
+        b"value",
+        Goes::AtMilliseconds(far_off()),
+    )]));
     let server = saved.server();
     let mut client = server.connect();
 
     client.send(&["KEYS", "*"]);
     client.expect_reply("*1\r\n$5\r\nlater\r\n");
+
+    client.send(&["GET", "later"]);
+    client.expect_reply("$5\r\nvalue\r\n");
+}
+
+#[test]
+fn tells_the_saved_keys_that_have_gone_from_the_ones_that_have_not() {
+    // The shape the stage describes: times to either side of now, written
+    // both ways round, and keys that carry no time at all.
+    let saved = Saved::new(&dataset_of(&[
+        (b"plain", b"always", Goes::Never),
+        (b"past-ms", b"gone", Goes::AtMilliseconds(long_gone())),
+        (b"future-ms", b"alive", Goes::AtMilliseconds(far_off())),
+        (b"past-s", b"gone", Goes::AtSeconds(long_gone())),
+        (b"future-s", b"alive", Goes::AtSeconds(far_off())),
+    ]));
+    let server = saved.server();
+
+    for (key, expected) in [
+        ("plain", "$6\r\nalways\r\n"),
+        ("past-ms", "$-1\r\n"),
+        ("future-ms", "$5\r\nalive\r\n"),
+        ("past-s", "$-1\r\n"),
+        ("future-s", "$5\r\nalive\r\n"),
+    ] {
+        // Each on a connection of its own, the way the tester asks.
+        let mut client = server.connect();
+
+        client.send(&["GET", key]);
+        client.expect_reply(expected);
+    }
+}
+
+#[test]
+fn lists_only_the_saved_keys_that_are_still_to_come() {
+    let saved = Saved::new(&dataset_of(&[
+        (b"plain", b"always", Goes::Never),
+        (b"past-ms", b"gone", Goes::AtMilliseconds(long_gone())),
+        (b"future-ms", b"alive", Goes::AtMilliseconds(far_off())),
+        (b"past-s", b"gone", Goes::AtSeconds(long_gone())),
+        (b"future-s", b"alive", Goes::AtSeconds(far_off())),
+    ]));
+    let server = saved.server();
+    let mut client = server.connect();
+
+    client.send(&["KEYS", "*"]);
+    let mut keys = client.read_command();
+    keys.sort();
+
+    assert_eq!(keys, ["future-ms", "future-s", "plain"]);
+}
+
+#[test]
+fn a_saved_key_goes_when_its_time_comes_round() {
+    let soon = SystemTime::now() + std::time::Duration::from_millis(400);
+    let saved = Saved::new(&dataset_of(&[(
+        b"soon",
+        b"value",
+        Goes::AtMilliseconds(soon),
+    )]));
+    let server = saved.server();
+    let mut client = server.connect();
+
+    // The time it was saved with is a moment in itself, not a stretch counted
+    // from when the file was read.
+    client.send(&["GET", "soon"]);
+    client.expect_reply("$5\r\nvalue\r\n");
+
+    std::thread::sleep(std::time::Duration::from_millis(700));
+
+    client.send(&["GET", "soon"]);
+    client.expect_reply("$-1\r\n");
+}
+
+#[test]
+fn lets_a_saved_key_be_given_a_new_lease() {
+    let saved = Saved::new(&dataset_of(&[(
+        b"later",
+        b"value",
+        Goes::AtMilliseconds(far_off()),
+    )]));
+    let server = saved.server();
+    let mut client = server.connect();
+
+    // Setting a key anew puts the time it carried behind it, whether that time
+    // came out of a file or out of an earlier command.
+    client.send(&["SET", "later", "fresh"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["GET", "later"]);
+    client.expect_reply("$5\r\nfresh\r\n");
 }
 
 #[test]
