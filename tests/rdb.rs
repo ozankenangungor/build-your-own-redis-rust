@@ -167,6 +167,23 @@ fn holds_what_each_of_the_saved_keys_held() {
 }
 
 #[test]
+fn hands_each_saved_value_to_a_caller_of_its_own() {
+    let held = [("foo", "bar"), ("baz", "qux"), ("hello", "world")];
+    let saved = Saved::new(&dataset(&held));
+    let server = saved.server();
+
+    // A dataset is read once, by the server, and not by whoever asks about it:
+    // every connection sees the same keys, and a first caller is no different
+    // from a second.
+    for (key, value) in held {
+        let mut client = server.connect();
+
+        client.send(&["GET", key]);
+        client.expect_reply(&format!("${}\r\n{value}\r\n", value.len()));
+    }
+}
+
+#[test]
 fn lists_nothing_when_nothing_was_ever_saved() {
     let saved = Saved::nothing();
     let server = saved.server();
