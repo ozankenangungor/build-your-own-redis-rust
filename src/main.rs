@@ -1,3 +1,4 @@
+mod aof;
 mod commands;
 mod config;
 mod connection;
@@ -27,6 +28,12 @@ async fn main() -> Result<()> {
     let store = Store::default();
     let loaded = rdb::load(&server.config, &store)?;
     eprintln!("loaded {loaded} keys from the saved dataset");
+
+    // A server that records what it does needs somewhere to record it, and
+    // needs it before the first client, not before the first write.
+    if let Some(dir) = aof::prepare(&server.config)? {
+        eprintln!("recording writes under {}", dir.display());
+    }
 
     let listener = TcpListener::bind(("127.0.0.1", server.config.port)).await?;
 

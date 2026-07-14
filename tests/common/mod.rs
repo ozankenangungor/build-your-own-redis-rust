@@ -86,6 +86,44 @@ impl Drop for Server {
     }
 }
 
+/// Runs a server that is expected to give up on its own, and says how it went.
+/// `None` means it was still going when the patience ran out and had to be put
+/// down.
+///
+/// Waited for rather than waited on: a server that wrongly comes up stays up
+/// for good, and a test that catches that is to fail, not hang.
+pub fn gives_up(args: &[&str], patience: Duration) -> Option<std::process::Output> {
+    let mut process = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"))
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to run the server");
+
+    let until = Instant::now() + patience;
+
+    while Instant::now() < until {
+        match process.try_wait().expect("failed to wait on the server") {
+            // The pipes are read only once the process is done with them, which
+            // is safe here: a server that gives up says little and says it to
+            // stderr, far short of what a pipe holds.
+            Some(_) => {
+                return Some(
+                    process
+                        .wait_with_output()
+                        .expect("failed to hear the server out"),
+                );
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+
+    let _ = process.kill();
+    let _ = process.wait();
+
+    None
+}
+
 /// Takes a connection through the handshake a replica makes, handing back the
 /// replica's end of it and the point in the master's history it starts from.
 pub fn follow(server: &Server) -> (Client, u64) {

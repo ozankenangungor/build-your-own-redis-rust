@@ -2,9 +2,8 @@ mod common;
 
 use common::Server;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A directory holding a saved dataset, swept up when it goes out of scope.
 struct Saved(PathBuf);
@@ -509,11 +508,11 @@ fn refuses_to_start_on_a_dataset_it_cannot_read() {
 
     // Coming up empty over a file that is there would look like the data had
     // gone, so the server says what is wrong and stops instead.
-    let output = Command::new(env!("CARGO_BIN_EXE_codecrafters-redis"))
-        .args(["--port", "0"])
-        .args(saved.args())
-        .output()
-        .expect("failed to run the server");
+    let mut args = vec!["--port", "0"];
+    args.extend(saved.args());
+
+    let output =
+        common::gives_up(&args, Duration::from_secs(10)).expect("the server came up and stayed up");
 
     assert!(!output.status.success(), "the server started anyway");
 
