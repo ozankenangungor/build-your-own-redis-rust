@@ -31,11 +31,57 @@ fn reports_where_redis_keeps_its_dataset_when_told_nothing() {
     let server = Server::start();
     let mut client = server.connect();
 
+    // The server is started from wherever these tests run, and answers with
+    // that directory named in full rather than as a `.`.
+    let here = std::env::current_dir().unwrap();
+    let here = here.to_string_lossy();
+
     client.send(&["CONFIG", "GET", "dir"]);
-    client.expect_reply("*2\r\n$3\r\ndir\r\n$1\r\n.\r\n");
+    client.expect_reply(&format!("*2\r\n$3\r\ndir\r\n${}\r\n{here}\r\n", here.len()));
 
     client.send(&["CONFIG", "GET", "dbfilename"]);
     client.expect_reply("*2\r\n$10\r\ndbfilename\r\n$8\r\ndump.rdb\r\n");
+}
+
+#[test]
+fn reports_what_it_would_write_down_as_it_goes_when_told_nothing() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    // Nothing is written down yet; these say only what would be, and where.
+    client.send(&["CONFIG", "GET", "appendonly"]);
+    client.expect_reply("*2\r\n$10\r\nappendonly\r\n$2\r\nno\r\n");
+
+    client.send(&["CONFIG", "GET", "appenddirname"]);
+    client.expect_reply("*2\r\n$13\r\nappenddirname\r\n$13\r\nappendonlydir\r\n");
+
+    client.send(&["CONFIG", "GET", "appendfilename"]);
+    client.expect_reply("*2\r\n$14\r\nappendfilename\r\n$14\r\nappendonly.aof\r\n");
+
+    client.send(&["CONFIG", "GET", "appendfsync"]);
+    client.expect_reply("*2\r\n$11\r\nappendfsync\r\n$8\r\neverysec\r\n");
+}
+
+#[test]
+fn reports_the_append_only_settings_alongside_the_dataset_ones() {
+    let server = with_a_dataset();
+    let mut client = server.connect();
+
+    client.send(&["CONFIG", "GET", "dbfilename", "appendfilename"]);
+    client.expect_reply(
+        "*4\r\n$10\r\ndbfilename\r\n$8\r\ndump.rdb\r\n$14\r\nappendfilename\r\n$14\r\nappendonly.aof\r\n",
+    );
+}
+
+#[test]
+fn accepts_any_casing_of_an_append_only_setting() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for name in ["appendfsync", "APPENDFSYNC", "AppendFsync"] {
+        client.send(&["CONFIG", "GET", name]);
+        client.expect_reply("*2\r\n$11\r\nappendfsync\r\n$8\r\neverysec\r\n");
+    }
 }
 
 #[test]

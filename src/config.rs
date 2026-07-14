@@ -5,8 +5,16 @@ const DEFAULT_PORT: u16 = 6379;
 
 /// Where Redis keeps its dataset when nothing says otherwise: a file named
 /// `dump.rdb`, in whichever directory the server was started from.
-const DEFAULT_DIR: &str = ".";
 const DEFAULT_DBFILENAME: &str = "dump.rdb";
+
+/// What Redis calls the append-only file, and the directory it keeps it in,
+/// when nothing says otherwise.
+const DEFAULT_APPENDDIRNAME: &str = "appendonlydir";
+const DEFAULT_APPENDFILENAME: &str = "appendonly.aof";
+
+/// How often Redis pushes what it has written through to the disk when nothing
+/// says otherwise: once a second, which loses at most a second's work.
+const DEFAULT_APPENDFSYNC: &str = "everysec";
 
 /// How the server was asked to run.
 #[derive(Debug, PartialEq)]
@@ -18,6 +26,15 @@ pub struct Config {
     /// Together they say where this server's data is to be found between runs.
     pub dir: String,
     pub dbfilename: String,
+    /// Whether every write is also written down as it happens, so that the
+    /// dataset can be built back up command by command.
+    pub appendonly: bool,
+    /// The directory under [`Config::dir`] that the append-only file lives in,
+    /// and the name it lives under.
+    pub appenddirname: String,
+    pub appendfilename: String,
+    /// How often what has been written is pushed through to the disk.
+    pub appendfsync: String,
 }
 
 /// Where to find the master a replica follows.
@@ -32,9 +49,27 @@ impl Default for Config {
         Self {
             port: DEFAULT_PORT,
             replicaof: None,
-            dir: DEFAULT_DIR.to_string(),
+            dir: starting_dir(),
             dbfilename: DEFAULT_DBFILENAME.to_string(),
+            appendonly: false,
+            appenddirname: DEFAULT_APPENDDIRNAME.to_string(),
+            appendfilename: DEFAULT_APPENDFILENAME.to_string(),
+            appendfsync: DEFAULT_APPENDFSYNC.to_string(),
         }
+    }
+}
+
+/// The directory the server was started in, which is where it keeps its data
+/// unless told otherwise.
+///
+/// Redis answers with a path rather than a `.`, since a client asking where the
+/// data is wants somewhere it can go looking. A working directory that cannot
+/// be read is no reason to refuse to start, so fall back to naming it as Redis
+/// writes it in its own configuration file.
+fn starting_dir() -> String {
+    match std::env::current_dir() {
+        Ok(dir) => dir.to_string_lossy().into_owned(),
+        Err(_) => ".".to_string(),
     }
 }
 
@@ -82,9 +117,20 @@ impl Config {
         Some(match name.to_ascii_lowercase().as_str() {
             "dir" => ("dir", &self.dir),
             "dbfilename" => ("dbfilename", &self.dbfilename),
+            // A setting Redis keeps as a yes or a no is asked after the same
+            // way as any other, and so has to answer in words.
+            "appendonly" => ("appendonly", yes_or_no(self.appendonly)),
+            "appenddirname" => ("appenddirname", &self.appenddirname),
+            "appendfilename" => ("appendfilename", &self.appendfilename),
+            "appendfsync" => ("appendfsync", &self.appendfsync),
             _ => return None,
         })
     }
+}
+
+/// How Redis writes a setting that is either on or off.
+fn yes_or_no(setting: bool) -> &'static str {
+    if setting { "yes" } else { "no" }
 }
 
 impl Master {
@@ -107,6 +153,7 @@ impl Master {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn parse(args: &[&str]) -> Result<Config> {
         Config::parse(args.iter().map(|arg| arg.to_string()))
@@ -160,8 +207,53 @@ mod tests {
     fn keeps_its_dataset_where_redis_does_unless_told_otherwise() {
         let config = parse(&[]).unwrap();
 
-        assert_eq!(config.dir, ".");
+        // Wherever the server was started, said as a path a client can follow
+        // rather than as the `.` that only means anything from here.
+        assert_eq!(
+            config.dir,
+            std::env::current_dir().unwrap().to_string_lossy()
+        );
+        assert!(Path::new(&config.dir).is_absolute(), "{}", config.dir);
         assert_eq!(config.dbfilename, "dump.rdb");
+    }
+
+    #[test]
+    fn writes_nothing_down_as_it_goes_unless_told_otherwise() {
+        let config = parse(&[]).unwrap();
+
+        assert!(!config.appendonly);
+        assert_eq!(config.appenddirname, "appendonlydir");
+        assert_eq!(config.appendfilename, "appendonly.aof");
+        assert_eq!(config.appendfsync, "everysec");
+    }
+
+    #[test]
+    fn hands_back_the_settings_the_append_only_file_is_kept_under() {
+        let config = parse(&[]).unwrap();
+
+        assert_eq!(config.setting("appendonly"), Some(("appendonly", "no")));
+        assert_eq!(
+            config.setting("appenddirname"),
+            Some(("appenddirname", "appendonlydir"))
+        );
+        assert_eq!(
+            config.setting("appendfilename"),
+            Some(("appendfilename", "appendonly.aof"))
+        );
+        assert_eq!(
+            config.setting("appendfsync"),
+            Some(("appendfsync", "everysec"))
+        );
+    }
+
+    #[test]
+    fn says_in_words_whether_it_writes_as_it_goes() {
+        let mut config = parse(&[]).unwrap();
+
+        assert_eq!(config.setting("APPENDONLY"), Some(("appendonly", "no")));
+
+        config.appendonly = true;
+        assert_eq!(config.setting("appendonly"), Some(("appendonly", "yes")));
     }
 
     #[test]
