@@ -63,6 +63,49 @@ fn reports_what_it_would_write_down_as_it_goes_when_told_nothing() {
 }
 
 #[test]
+fn reports_the_append_only_settings_it_was_given() {
+    let server = Server::start_with(&[
+        "--dir",
+        "/tmp/redis-files",
+        "--appendonly",
+        "yes",
+        "--appenddirname",
+        "aof",
+        "--appendfilename",
+        "writes.aof",
+        "--appendfsync",
+        "always",
+    ]);
+    let mut client = server.connect();
+
+    client.send(&["CONFIG", "GET", "dir"]);
+    client.expect_reply("*2\r\n$3\r\ndir\r\n$16\r\n/tmp/redis-files\r\n");
+
+    client.send(&["CONFIG", "GET", "appendonly"]);
+    client.expect_reply("*2\r\n$10\r\nappendonly\r\n$3\r\nyes\r\n");
+
+    client.send(&["CONFIG", "GET", "appenddirname"]);
+    client.expect_reply("*2\r\n$13\r\nappenddirname\r\n$3\r\naof\r\n");
+
+    client.send(&["CONFIG", "GET", "appendfilename"]);
+    client.expect_reply("*2\r\n$14\r\nappendfilename\r\n$10\r\nwrites.aof\r\n");
+
+    client.send(&["CONFIG", "GET", "appendfsync"]);
+    client.expect_reply("*2\r\n$11\r\nappendfsync\r\n$6\r\nalways\r\n");
+}
+
+#[test]
+fn reports_the_defaults_for_the_append_only_settings_it_was_not_given() {
+    let server = Server::start_with(&["--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    client.send(&["CONFIG", "GET", "appendonly", "appendfilename"]);
+    client.expect_reply(
+        "*4\r\n$10\r\nappendonly\r\n$3\r\nyes\r\n$14\r\nappendfilename\r\n$14\r\nappendonly.aof\r\n",
+    );
+}
+
+#[test]
 fn reports_the_append_only_settings_alongside_the_dataset_ones() {
     let server = with_a_dataset();
     let mut client = server.connect();

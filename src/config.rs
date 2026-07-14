@@ -100,6 +100,10 @@ impl Config {
                 "replicaof" => config.replicaof = Some(Master::parse(&value)?),
                 "dir" => config.dir = value,
                 "dbfilename" => config.dbfilename = value,
+                "appendonly" => config.appendonly = yes_or_no_given(&value)?,
+                "appenddirname" => config.appenddirname = value,
+                "appendfilename" => config.appendfilename = value,
+                "appendfsync" => config.appendfsync = value,
                 _ => bail!("unknown flag '{flag}'"),
             }
         }
@@ -131,6 +135,19 @@ impl Config {
 /// How Redis writes a setting that is either on or off.
 fn yes_or_no(setting: bool) -> &'static str {
     if setting { "yes" } else { "no" }
+}
+
+/// Reads a setting that is either on or off, in the words Redis takes it in.
+///
+/// Anything else is refused. There are only two answers to give, so a third is
+/// a mistake, and a server that took `--appendonly ye` for a no would go on to
+/// lose every write the flag was there to keep.
+fn yes_or_no_given(value: &str) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "yes" => Ok(true),
+        "no" => Ok(false),
+        _ => bail!("expected 'yes' or 'no', found '{value}'"),
+    }
 }
 
 impl Master {
@@ -225,6 +242,72 @@ mod tests {
         assert_eq!(config.appenddirname, "appendonlydir");
         assert_eq!(config.appendfilename, "appendonly.aof");
         assert_eq!(config.appendfsync, "everysec");
+    }
+
+    #[test]
+    fn takes_the_settings_the_append_only_file_is_to_be_kept_under() {
+        let config = parse(&[
+            "--appendonly",
+            "yes",
+            "--appenddirname",
+            "aof",
+            "--appendfilename",
+            "writes.aof",
+            "--appendfsync",
+            "always",
+        ])
+        .unwrap();
+
+        assert!(config.appendonly);
+        assert_eq!(config.appenddirname, "aof");
+        assert_eq!(config.appendfilename, "writes.aof");
+        assert_eq!(config.appendfsync, "always");
+    }
+
+    #[test]
+    fn keeps_the_defaults_for_the_append_only_settings_it_was_not_given() {
+        // A flag left out is not a flag set to nothing: the rest stand as they
+        // were, which is what makes passing one of the five safe.
+        let config = parse(&["--appendonly", "yes"]).unwrap();
+
+        assert!(config.appendonly);
+        assert_eq!(config.appenddirname, "appendonlydir");
+        assert_eq!(config.appendfilename, "appendonly.aof");
+        assert_eq!(config.appendfsync, "everysec");
+    }
+
+    #[test]
+    fn takes_the_append_only_settings_alongside_the_dataset_ones() {
+        let config = parse(&["--dir", "/tmp/redis-files", "--appendonly", "yes"]).unwrap();
+
+        assert_eq!(config.dir, "/tmp/redis-files");
+        assert!(config.appendonly);
+    }
+
+    #[test]
+    fn takes_a_yes_or_a_no_however_it_is_spelled() {
+        for value in ["yes", "YES", "Yes"] {
+            assert!(
+                parse(&["--appendonly", value]).unwrap().appendonly,
+                "{value}"
+            );
+        }
+
+        for value in ["no", "NO", "No"] {
+            assert!(
+                !parse(&["--appendonly", value]).unwrap().appendonly,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_an_append_only_setting_that_is_neither_a_yes_nor_a_no() {
+        // Taking a `ye` for a no would lose every write the flag was there to
+        // keep, and say nothing about it.
+        for value in ["ye", "true", "1", ""] {
+            assert!(parse(&["--appendonly", value]).is_err(), "{value:?}");
+        }
     }
 
     #[test]
