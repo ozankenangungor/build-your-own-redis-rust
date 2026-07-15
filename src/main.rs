@@ -19,21 +19,24 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let server = Arc::new(Server::new(Config::from_args()?));
+    let config = Config::from_args()?;
 
     // Whatever was saved last time is where this server picks up, and it picks
     // up before it takes a caller. A file that cannot be read is not treated as
     // one that was never saved: coming up empty over a dataset that is there
     // would look for all the world like the data had gone.
     let store = Store::default();
-    let loaded = rdb::load(&server.config, &store)?;
+    let loaded = rdb::load(&config, &store)?;
     eprintln!("loaded {loaded} keys from the saved dataset");
 
     // A server that records what it does needs somewhere to record it, and
     // needs it before the first client, not before the first write.
-    if let Some(file) = aof::prepare(&server.config)? {
-        eprintln!("recording writes in {}", file.display());
+    let aof = aof::prepare(&config)?;
+    if let Some(aof) = &aof {
+        eprintln!("recording writes in {}", aof.path().display());
     }
+
+    let server = Arc::new(Server::new(config, aof));
 
     let listener = TcpListener::bind(("127.0.0.1", server.config.port)).await?;
 

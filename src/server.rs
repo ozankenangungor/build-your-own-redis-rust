@@ -1,3 +1,4 @@
+use crate::aof::Aof;
 use crate::config::Config;
 use crate::replicas::Replicas;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +15,9 @@ pub struct Server {
     /// The replicas following this server, each waiting to be told what has
     /// changed.
     pub replicas: Replicas,
+    /// Where the writes are recorded as they happen, for a server keeping such
+    /// a record. `None` is a server that keeps none.
+    pub aof: Option<Aof>,
 }
 
 /// A server's place in the history of a dataset.
@@ -40,7 +44,7 @@ impl Replication {
 }
 
 impl Server {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, aof: Option<Aof>) -> Self {
         Self {
             config,
             replication: Replication {
@@ -48,6 +52,7 @@ impl Server {
                 offset: AtomicU64::new(0),
             },
             replicas: Replicas::default(),
+            aof,
         }
     }
 }
@@ -106,12 +111,12 @@ mod tests {
 
     #[test]
     fn starts_a_master_at_the_beginning_of_its_history() {
-        assert_eq!(Server::new(Config::default()).replication.offset(), 0);
+        assert_eq!(Server::new(Config::default(), None).replication.offset(), 0);
     }
 
     #[test]
     fn counts_the_history_it_hands_out() {
-        let server = Server::new(Config::default());
+        let server = Server::new(Config::default(), None);
 
         server.replication.advance(29);
         server.replication.advance(14);

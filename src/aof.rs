@@ -2,8 +2,12 @@
 //! server coming back up can play its way to where it left off.
 
 use crate::config::Config;
+use crate::resp::Value;
 use anyhow::{Context, Result};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 /// The directory the append-only files are kept in. It sits inside the
 /// directory the dataset is kept in, under a name of its own, so that the two
@@ -23,10 +27,55 @@ const FIRST: u32 = 1;
 /// after another, rather than a copy of the whole dataset at one moment.
 const INCREMENTAL: &str = "i";
 
-/// The file the commands coming in are recorded in, under the name Redis gives
-/// the `sequence`th of them.
-pub fn incremental(config: &Config, sequence: u32) -> PathBuf {
-    directory(config).join(incremental_name(config, sequence))
+/// What `appendfsync` is set to when every write is to be pushed through to the
+/// disk before the client is told it took.
+const ALWAYS: &str = "always";
+
+/// The record of the writes this server has been asked to make, kept open for
+/// as long as it runs.
+pub struct Aof {
+    path: PathBuf,
+    /// One lock over the file, so that two commands recorded at once come out
+    /// one after the other rather than woven together.
+    file: Mutex<tokio::fs::File>,
+    /// Whether a write is pushed through to the disk before the client that
+    /// asked for it is told it took.
+    durable: bool,
+}
+
+impl Aof {
+    /// The file the writes are being recorded in.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Records one command, exactly as the client sent it.
+    ///
+    /// The command is written down before the caller replies, so that a client
+    /// is never told a write took when nothing knows of it but memory.
+    pub async fn record(&self, command: &Value) -> Result<()> {
+        let recorded = command.encode();
+        let mut file = self.file.lock().await;
+
+        file.write_all(&recorded)
+            .await
+            .with_context(|| format!("recording a command in {}", self.path.display()))?;
+
+        // Written all the way out to the file rather than left in hand: a write
+        // still waiting in this process is one nothing else can see, whatever
+        // the client has been told.
+        file.flush()
+            .await
+            .with_context(|| format!("writing out to {}", self.path.display()))?;
+
+        if self.durable {
+            file.sync_data()
+                .await
+                .with_context(|| format!("pushing {} through to the disk", self.path.display()))?;
+        }
+
+        Ok(())
+    }
 }
 
 fn incremental_name(config: &Config, sequence: u32) -> String {
@@ -54,16 +103,57 @@ fn listing(config: &Config) -> String {
     )
 }
 
-/// Makes ready the place the writes are to be recorded, for a server that was
-/// told to record them, and hands back the file they are to be recorded in.
+/// The name of the file the incoming commands belong in, according to a
+/// manifest that is already there. `None` means there is no manifest to go on.
 ///
-/// Nothing is written here yet. This only sees to it that there is somewhere to
+/// The last incremental file listed is the one still being added to: any before
+/// it were closed off when a copy of the dataset was written out.
+fn recorded_in(manifest: &Path) -> Result<Option<String>> {
+    let listing = match std::fs::read_to_string(manifest) {
+        Ok(listing) => listing,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", manifest.display())),
+    };
+
+    Ok(listing
+        .lines()
+        .filter_map(listed)
+        .filter(|(_, kind)| kind == INCREMENTAL)
+        .map(|(name, _)| name)
+        .next_back())
+}
+
+/// One line of a manifest read as the file it names and what that file holds.
+///
+/// A line is a run of fields, each a name followed by its value. They are read
+/// by name rather than by where they sit, and the ones this server has no use
+/// for are passed over: a manifest written by a fuller Redis says more than
+/// this one needs.
+fn listed(line: &str) -> Option<(String, String)> {
+    let mut name = None;
+    let mut kind = None;
+    let mut words = line.split_whitespace();
+
+    while let (Some(field), Some(value)) = (words.next(), words.next()) {
+        match field {
+            "file" => name = Some(value.to_string()),
+            "type" => kind = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    Some((name?, kind?))
+}
+
+/// Makes ready the record of the writes, for a server that was told to keep one.
+///
+/// Nothing is written to it yet. This only sees to it that there is somewhere to
 /// write, and sees to it at startup rather than at the first write, so that no
 /// write is ever the one to find the file missing.
 ///
-/// A server told to record nothing leaves the directory alone. Making one it
+/// A server told to keep no record leaves the directory alone. Making one it
 /// would never write to would be a puzzle for whoever found it.
-pub fn prepare(config: &Config) -> Result<Option<PathBuf>> {
+pub fn prepare(config: &Config) -> Result<Option<Aof>> {
     if !config.appendonly {
         return Ok(None);
     }
@@ -74,25 +164,39 @@ pub fn prepare(config: &Config) -> Result<Option<PathBuf>> {
     // a server restarted over its own data finds.
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
-    let file = incremental(config, FIRST);
+    let manifest = manifest(config);
+
+    // A manifest already there is what the writes are to follow, whatever this
+    // server was started with. It is the record of what was written and in what
+    // order, and settings that disagree with it are settings, not history.
+    let name = match recorded_in(&manifest)? {
+        Some(name) => name,
+        None => {
+            // Nothing has been recorded here before, so this server says what
+            // the first file is to be.
+            std::fs::write(&manifest, listing(config))
+                .with_context(|| format!("writing {}", manifest.display()))?;
+
+            incremental_name(config, FIRST)
+        }
+    };
+
+    let path = dir.join(name);
 
     // Opened to be written on the end of rather than made afresh. A server that
     // finds a record of its own writes has no business throwing it away, least
     // of all before anything has had the chance to read it back.
-    std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&file)
-        .with_context(|| format!("opening {}", file.display()))?;
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
 
-    // The manifest says what the files are, not what is in them, so it is
-    // written out as it stands rather than added to. Two servers over one
-    // directory would be a worse mistake than either of their manifests.
-    let manifest = manifest(config);
-    std::fs::write(&manifest, listing(config))
-        .with_context(|| format!("writing {}", manifest.display()))?;
-
-    Ok(Some(file))
+    Ok(Some(Aof {
+        path,
+        file: Mutex::new(tokio::fs::File::from_std(file)),
+        durable: config.appendfsync.eq_ignore_ascii_case(ALWAYS),
+    }))
 }
 
 #[cfg(test)]
@@ -134,12 +238,21 @@ mod tests {
         }
     }
 
+    /// The file a server set up this way would record its writes in.
+    fn made(config: &Config) -> PathBuf {
+        prepare(config)
+            .unwrap()
+            .expect("a file was to be made")
+            .path()
+            .to_path_buf()
+    }
+
     #[test]
     fn makes_somewhere_to_write_when_it_is_to_write_as_it_goes() {
         let somewhere = Somewhere::new();
         let config = somewhere.config(true);
 
-        let file = prepare(&config).unwrap().expect("a file was to be made");
+        let file = made(&config);
         let dir = somewhere.0.join("appendonlydir");
 
         assert!(dir.is_dir(), "{}", dir.display());
@@ -154,7 +267,7 @@ mod tests {
 
         // The file is there to be written to, not written to yet: what it holds
         // is what the commands to come put in it, and nothing besides.
-        let file = prepare(&config).unwrap().expect("a file was to be made");
+        let file = made(&config);
 
         assert_eq!(std::fs::read(&file).unwrap(), b"");
     }
@@ -166,7 +279,7 @@ mod tests {
         config.appenddirname = "my-writes".to_string();
         config.appendfilename = "writes.aof".to_string();
 
-        let file = prepare(&config).unwrap().expect("a file was to be made");
+        let file = made(&config);
 
         assert!(somewhere.0.join("my-writes").is_dir());
         assert_eq!(
@@ -213,23 +326,109 @@ mod tests {
         );
     }
 
+    /// Leaves a manifest behind for the next server to find, as one that had
+    /// been running here would have.
+    fn left_behind(somewhere: &Somewhere, listing: &str) -> PathBuf {
+        let dir = somewhere.0.join("appendonlydir");
+        std::fs::create_dir_all(&dir).expect("failed to make a directory to leave it in");
+
+        let manifest = dir.join("appendonly.aof.manifest");
+        std::fs::write(&manifest, listing).expect("failed to leave a manifest behind");
+
+        manifest
+    }
+
     #[test]
-    fn writes_the_manifest_out_again_on_a_restart() {
+    fn records_in_the_file_the_manifest_it_finds_names() {
         let somewhere = Somewhere::new();
         let config = somewhere.config(true);
-        let manifest = somewhere
-            .0
-            .join("appendonlydir")
-            .join("appendonly.aof.manifest");
+        left_behind(&somewhere, "file elsewhere.aof.1.incr.aof seq 1 type i\n");
+
+        // The manifest is the record of what was written and in what order.
+        // Settings that disagree with it are settings, not history.
+        let file = made(&config);
+
+        assert_eq!(
+            file,
+            somewhere
+                .0
+                .join("appendonlydir")
+                .join("elsewhere.aof.1.incr.aof")
+        );
+    }
+
+    #[test]
+    fn leaves_a_manifest_it_finds_as_it_found_it() {
+        let somewhere = Somewhere::new();
+        let config = somewhere.config(true);
+        let listing = "file elsewhere.aof.1.incr.aof seq 4 type i\n";
+        let manifest = left_behind(&somewhere, listing);
 
         prepare(&config).unwrap();
-        std::fs::write(&manifest, "file nothing.aof seq 9 type i\n")
-            .expect("failed to leave a stale manifest behind");
 
-        // The manifest says what the files are, not what is in them, so it is
-        // rewritten rather than added to or left as it was found.
-        prepare(&config).unwrap();
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), listing);
+    }
 
+    #[test]
+    fn records_in_the_last_of_the_files_a_manifest_lists() {
+        let somewhere = Somewhere::new();
+        let config = somewhere.config(true);
+
+        // A copy of the whole dataset, then the writes since. The last of them
+        // is the one still being added to.
+        left_behind(
+            &somewhere,
+            "file base.aof.1.base.rdb seq 1 type b\n\
+             file writes.aof.1.incr.aof seq 1 type i\n\
+             file writes.aof.2.incr.aof seq 2 type i\n",
+        );
+
+        assert_eq!(
+            made(&config),
+            somewhere
+                .0
+                .join("appendonlydir")
+                .join("writes.aof.2.incr.aof")
+        );
+    }
+
+    #[test]
+    fn passes_over_what_a_manifest_says_that_it_has_no_use_for() {
+        let somewhere = Somewhere::new();
+        let config = somewhere.config(true);
+
+        // A fuller Redis writes more fields than this server reads, and writes
+        // them in whatever order it pleases.
+        left_behind(
+            &somewhere,
+            "seq 7 type i file elsewhere.aof.7.incr.aof startoffset 12345\n",
+        );
+
+        assert_eq!(
+            made(&config),
+            somewhere
+                .0
+                .join("appendonlydir")
+                .join("elsewhere.aof.7.incr.aof")
+        );
+    }
+
+    #[test]
+    fn writes_a_manifest_of_its_own_when_it_finds_none_it_can_follow() {
+        let somewhere = Somewhere::new();
+        let config = somewhere.config(true);
+
+        // Lines that name no file, or say nothing of what one holds, are no
+        // help in finding where the writes belong.
+        let manifest = left_behind(&somewhere, "\n# nothing to go on\nfile lonely.aof\n");
+
+        assert_eq!(
+            made(&config),
+            somewhere
+                .0
+                .join("appendonlydir")
+                .join("appendonly.aof.1.incr.aof")
+        );
         assert_eq!(
             std::fs::read_to_string(&manifest).unwrap(),
             "file appendonly.aof.1.incr.aof seq 1 type i\n"
@@ -241,7 +440,7 @@ mod tests {
         let somewhere = Somewhere::new();
         let config = somewhere.config(false);
 
-        assert_eq!(prepare(&config).unwrap(), None);
+        assert!(prepare(&config).unwrap().is_none());
         assert!(!somewhere.0.join("appendonlydir").exists());
         assert!(!somewhere.0.join("appendonly.aof.manifest").exists());
     }
@@ -267,7 +466,7 @@ mod tests {
         let somewhere = Somewhere::new();
         let config = somewhere.config(true);
 
-        let file = prepare(&config).unwrap().expect("a file was to be made");
+        let file = made(&config);
         std::fs::write(&file, b"*1\r\n$4\r\nPING\r\n").expect("failed to record a command");
 
         prepare(&config).unwrap();
@@ -275,6 +474,129 @@ mod tests {
         // Starting up is no reason to throw away a record of what was done, and
         // certainly not before anything has had the chance to read it back.
         assert_eq!(std::fs::read(&file).unwrap(), b"*1\r\n$4\r\nPING\r\n");
+    }
+
+    /// A command as a client would have sent it.
+    fn sent(words: &[&str]) -> Value {
+        Value::Array(
+            words
+                .iter()
+                .map(|word| Value::BulkString(bytes::Bytes::copy_from_slice(word.as_bytes())))
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn records_a_command_as_the_client_sent_it() {
+        let somewhere = Somewhere::new();
+        let config = somewhere.config(true);
+        let aof = prepare(&config).unwrap().expect("a file was to be made");
+
+        aof.record(&sent(&["SET", "foo", "100"])).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(aof.path()).unwrap(),
+            b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n100\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn records_one_command_after_another() {
+        let somewhere = Somewhere::new();
+        let config = somewhere.config(true);
+        let aof = prepare(&config).unwrap().expect("a file was to be made");
+
+        aof.record(&sent(&["SET", "foo", "1"])).await.unwrap();
+        aof.record(&sent(&["SET", "bar", "2"])).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(aof.path()).unwrap(),
+            b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn records_on_the_end_of_what_was_written_before() {
+        let somewhere = Somewhere::new();
+        let config = somewhere.config(true);
+
+        {
+            let aof = prepare(&config).unwrap().expect("a file was to be made");
+            aof.record(&sent(&["SET", "foo", "1"])).await.unwrap();
+        }
+
+        // A restart carries on from where the last run left off rather than
+        // over it.
+        let aof = prepare(&config).unwrap().expect("a file was to be made");
+        aof.record(&sent(&["SET", "bar", "2"])).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(aof.path()).unwrap(),
+            b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn records_a_value_that_is_not_text() {
+        let somewhere = Somewhere::new();
+        let config = somewhere.config(true);
+        let aof = prepare(&config).unwrap().expect("a file was to be made");
+
+        // A value is a run of bytes and may hold anything, newlines included.
+        let value = bytes::Bytes::from_static(b"\r\n\x00\xff");
+        let command = Value::Array(vec![
+            Value::BulkString(bytes::Bytes::from_static(b"SET")),
+            Value::BulkString(bytes::Bytes::from_static(b"k")),
+            Value::BulkString(value),
+        ]);
+
+        aof.record(&command).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(aof.path()).unwrap(),
+            b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$4\r\n\r\n\x00\xff\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn pushes_a_write_through_to_the_disk_when_told_to() {
+        let somewhere = Somewhere::new();
+        let mut config = somewhere.config(true);
+        config.appendfsync = "always".to_string();
+
+        let aof = prepare(&config).unwrap().expect("a file was to be made");
+
+        // What is asked for here cannot be seen from inside the process: all
+        // that can be checked is that asking for it works and loses nothing.
+        assert!(aof.durable);
+        aof.record(&sent(&["SET", "foo", "1"])).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(aof.path()).unwrap(),
+            b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n"
+        );
+    }
+
+    #[test]
+    fn takes_how_often_to_push_through_to_the_disk_however_it_is_spelled() {
+        let somewhere = Somewhere::new();
+        let mut config = somewhere.config(true);
+
+        for spelling in ["always", "ALWAYS", "Always"] {
+            config.appendfsync = spelling.to_string();
+            assert!(
+                prepare(&config).unwrap().expect("a file").durable,
+                "{spelling}"
+            );
+        }
+
+        for other in ["everysec", "no"] {
+            config.appendfsync = other.to_string();
+            assert!(
+                !prepare(&config).unwrap().expect("a file").durable,
+                "{other}"
+            );
+        }
     }
 
     #[test]

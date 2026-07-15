@@ -103,13 +103,27 @@ async fn dispatch(
 ) -> Value {
     let reply = run_against(command, store, transaction, server).await;
 
+    // A command that changed nothing is nothing to pass on or write down, and
+    // one that failed changed nothing.
+    if !changes_the_store(&command.uppercased) || matches!(reply, Value::Error(_)) {
+        return reply;
+    }
+
+    let as_sent = command.as_sent();
+
+    // The record of the write is made before its reply goes out, so that a
+    // client is never told a write took when nothing knows of it but memory.
+    if let Some(aof) = &server.aof
+        && let Err(e) = aof.record(&as_sent).await
+    {
+        eprintln!("could not record a command: {e:#}");
+        return unrecorded();
+    }
+
     // Replicas are told what changed only once it has, and only by the server
     // the change was asked of: a replica passes nothing on of its own.
-    if changes_the_store(&command.uppercased)
-        && !matches!(reply, Value::Error(_))
-        && server.config.replicaof.is_none()
-    {
-        let passed_on = server.replicas.send(&command.as_sent());
+    if server.config.replicaof.is_none() {
+        let passed_on = server.replicas.send(&as_sent);
         server.replication.advance(passed_on);
     }
 
@@ -239,6 +253,16 @@ fn wrong_arity(command: &str) -> Value {
 
 fn not_an_integer() -> Value {
     Value::Error("ERR value is not an integer or out of range".into())
+}
+
+/// What a client is told when its write could not be written down.
+///
+/// The store has already been changed by this point, so this is not the whole
+/// truth: the write took, and only the record of it did not. Saying so anyway
+/// is the lesser wrong, since a client told a write succeeded will go on
+/// believing it survived a restart, and this one will not have.
+fn unrecorded() -> Value {
+    Value::Error("MISCONF Errors writing to the AOF file".into())
 }
 
 fn wrong_type() -> Value {

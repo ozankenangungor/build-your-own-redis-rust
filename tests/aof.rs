@@ -31,6 +31,25 @@ impl Data {
     fn holds(&self, name: &str) -> PathBuf {
         self.0.join(name)
     }
+
+    /// A file inside the directory the writes are recorded in.
+    fn records(&self, name: &str) -> PathBuf {
+        self.0.join("appendonlydir").join(name)
+    }
+
+    /// Leaves a manifest and the empty file it names behind, as a server that
+    /// had been running here would have.
+    fn left_recording_in(&self, name: &str) {
+        let dir = self.0.join("appendonlydir");
+        std::fs::create_dir_all(&dir).expect("failed to make a directory to leave it in");
+
+        std::fs::write(dir.join(name), b"").expect("failed to leave a file behind");
+        std::fs::write(
+            dir.join("appendonly.aof.manifest"),
+            format!("file {name} seq 1 type i\n"),
+        )
+        .expect("failed to leave a manifest behind");
+    }
 }
 
 impl Drop for Data {
@@ -150,6 +169,85 @@ fn starts_over_what_it_left_behind_last_time() {
     client.expect_reply("+PONG\r\n");
 
     assert_eq!(std::fs::read(&file).unwrap(), b"*1\r\n$4\r\nPING\r\n");
+}
+
+#[test]
+fn records_a_write_in_the_file_the_manifest_names() {
+    let data = Data::new();
+
+    // A manifest naming a file that is not the one the settings would have
+    // picked, which is the whole reason to read the manifest at all.
+    data.left_recording_in("elsewhere.aof.1.incr.aof");
+
+    let server = Server::start_with(&[
+        "--dir",
+        data.dir(),
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "always",
+    ]);
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "100"]);
+    client.expect_reply("+OK\r\n");
+
+    // Read the moment the reply arrives: the write is to be in the file by the
+    // time the client hears that it took.
+    assert_eq!(
+        std::fs::read(data.records("elsewhere.aof.1.incr.aof")).unwrap(),
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n100\r\n"
+    );
+    assert!(!data.records("appendonly.aof.1.incr.aof").exists());
+}
+
+#[test]
+fn records_a_write_the_client_asked_for_word_for_word() {
+    let data = Data::new();
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    // Whatever the client sent is what goes down, spelling and all: it is to be
+    // played back as a command, not summarised.
+    client.send(&["set", "foo", "bar", "px", "100000"]);
+    client.expect_reply("+OK\r\n");
+
+    assert_eq!(
+        std::fs::read(data.records("appendonly.aof.1.incr.aof")).unwrap(),
+        b"*5\r\n$3\r\nset\r\n$3\r\nfoo\r\n$3\r\nbar\r\n$2\r\npx\r\n$6\r\n100000\r\n"
+    );
+}
+
+#[test]
+fn records_nothing_for_a_write_that_was_refused() {
+    let data = Data::new();
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    // A command that failed changed nothing, so there is nothing to play back.
+    client.send(&["SET", "foo"]);
+    client.read_reply();
+    client.send(&["INCR"]);
+    client.read_reply();
+
+    assert_eq!(
+        std::fs::read(data.records("appendonly.aof.1.incr.aof")).unwrap(),
+        b""
+    );
+}
+
+#[test]
+fn records_nothing_when_it_was_not_asked_to_record() {
+    let data = Data::new();
+    let server = Server::start_with(&["--dir", data.dir()]);
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "100"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$3\r\n100\r\n");
+
+    assert!(!data.holds("appendonlydir").exists());
 }
 
 #[test]
