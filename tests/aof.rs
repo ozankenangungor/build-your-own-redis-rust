@@ -70,6 +70,19 @@ fn leaves_the_file_it_makes_empty() {
 }
 
 #[test]
+fn writes_a_manifest_naming_the_file_it_made() {
+    let data = Data::new();
+    let _server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+
+    let manifest = data.holds("appendonlydir").join("appendonly.aof.manifest");
+
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        "file appendonly.aof.1.incr.aof seq 1 type i\n"
+    );
+}
+
+#[test]
 fn records_under_the_names_it_was_given() {
     let data = Data::new();
     let _server = Server::start_with(&[
@@ -88,6 +101,10 @@ fn records_under_the_names_it_was_given() {
         data.holds("my_aof_dir")
             .join("my_writes.aof.1.incr.aof")
             .is_file()
+    );
+    assert_eq!(
+        std::fs::read_to_string(data.holds("my_aof_dir").join("my_writes.aof.manifest")).unwrap(),
+        "file my_writes.aof.1.incr.aof seq 1 type i\n"
     );
     assert!(!data.holds("appendonlydir").exists());
 }

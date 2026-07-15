@@ -19,10 +19,39 @@ pub fn directory(config: &Config) -> PathBuf {
 /// made here; the rest are for when a copy is written and the count starts over.
 const FIRST: u32 = 1;
 
+/// How the manifest marks a file holding the commands as they came in, one
+/// after another, rather than a copy of the whole dataset at one moment.
+const INCREMENTAL: &str = "i";
+
 /// The file the commands coming in are recorded in, under the name Redis gives
 /// the `sequence`th of them.
 pub fn incremental(config: &Config, sequence: u32) -> PathBuf {
-    directory(config).join(format!("{}.{sequence}.incr.aof", config.appendfilename))
+    directory(config).join(incremental_name(config, sequence))
+}
+
+fn incremental_name(config: &Config, sequence: u32) -> String {
+    format!("{}.{sequence}.incr.aof", config.appendfilename)
+}
+
+/// The manifest: a listing of the files the writes are spread over, and of the
+/// order they are to be played back in.
+///
+/// A server coming back up reads this before anything else. Working the files
+/// out from what happens to be in the directory would leave it guessing at
+/// which of them came first.
+fn manifest(config: &Config) -> PathBuf {
+    directory(config).join(format!("{}.manifest", config.appendfilename))
+}
+
+/// The manifest as it stands with only the first file written to.
+///
+/// One line to a file, each a run of words separated by a single space and
+/// closed by a newline, which is the shape Redis reads back.
+fn listing(config: &Config) -> String {
+    format!(
+        "file {} seq {FIRST} type {INCREMENTAL}\n",
+        incremental_name(config, FIRST)
+    )
 }
 
 /// Makes ready the place the writes are to be recorded, for a server that was
@@ -55,6 +84,13 @@ pub fn prepare(config: &Config) -> Result<Option<PathBuf>> {
         .append(true)
         .open(&file)
         .with_context(|| format!("opening {}", file.display()))?;
+
+    // The manifest says what the files are, not what is in them, so it is
+    // written out as it stands rather than added to. Two servers over one
+    // directory would be a worse mistake than either of their manifests.
+    let manifest = manifest(config);
+    std::fs::write(&manifest, listing(config))
+        .with_context(|| format!("writing {}", manifest.display()))?;
 
     Ok(Some(file))
 }
@@ -141,12 +177,73 @@ mod tests {
     }
 
     #[test]
+    fn writes_a_manifest_naming_the_file_it_made() {
+        let somewhere = Somewhere::new();
+        let config = somewhere.config(true);
+
+        prepare(&config).unwrap();
+
+        let manifest = somewhere
+            .0
+            .join("appendonlydir")
+            .join("appendonly.aof.manifest");
+
+        assert_eq!(
+            std::fs::read_to_string(&manifest).unwrap(),
+            "file appendonly.aof.1.incr.aof seq 1 type i\n"
+        );
+    }
+
+    #[test]
+    fn names_the_file_in_the_manifest_without_the_way_to_it() {
+        let somewhere = Somewhere::new();
+        let mut config = somewhere.config(true);
+        config.appenddirname = "my-writes".to_string();
+        config.appendfilename = "writes.aof".to_string();
+
+        prepare(&config).unwrap();
+
+        // The manifest sits beside the files it lists, so it names them and
+        // says nothing of where they are.
+        let manifest = somewhere.0.join("my-writes").join("writes.aof.manifest");
+
+        assert_eq!(
+            std::fs::read_to_string(&manifest).unwrap(),
+            "file writes.aof.1.incr.aof seq 1 type i\n"
+        );
+    }
+
+    #[test]
+    fn writes_the_manifest_out_again_on_a_restart() {
+        let somewhere = Somewhere::new();
+        let config = somewhere.config(true);
+        let manifest = somewhere
+            .0
+            .join("appendonlydir")
+            .join("appendonly.aof.manifest");
+
+        prepare(&config).unwrap();
+        std::fs::write(&manifest, "file nothing.aof seq 9 type i\n")
+            .expect("failed to leave a stale manifest behind");
+
+        // The manifest says what the files are, not what is in them, so it is
+        // rewritten rather than added to or left as it was found.
+        prepare(&config).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&manifest).unwrap(),
+            "file appendonly.aof.1.incr.aof seq 1 type i\n"
+        );
+    }
+
+    #[test]
     fn makes_nothing_when_it_is_to_write_nothing() {
         let somewhere = Somewhere::new();
         let config = somewhere.config(false);
 
         assert_eq!(prepare(&config).unwrap(), None);
         assert!(!somewhere.0.join("appendonlydir").exists());
+        assert!(!somewhere.0.join("appendonly.aof.manifest").exists());
     }
 
     #[test]
