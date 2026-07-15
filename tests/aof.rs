@@ -44,9 +44,12 @@ fn makes_somewhere_to_record_its_writes_before_it_takes_a_client() {
     let data = Data::new();
     let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
 
-    // The server says it is listening before this test connects, so the
-    // directory is already there by the time any command could be sent.
-    assert!(data.holds("appendonlydir").is_dir());
+    // The server says it is listening before this test connects, so both are
+    // already there by the time any command could be sent.
+    let dir = data.holds("appendonlydir");
+
+    assert!(dir.is_dir());
+    assert!(dir.join("appendonly.aof.1.incr.aof").is_file());
 
     let mut client = server.connect();
     client.send(&["PING"]);
@@ -54,7 +57,20 @@ fn makes_somewhere_to_record_its_writes_before_it_takes_a_client() {
 }
 
 #[test]
-fn records_under_the_name_it_was_given() {
+fn leaves_the_file_it_makes_empty() {
+    let data = Data::new();
+    let _server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+
+    // Nothing is recorded until there is something to record.
+    let file = data
+        .holds("appendonlydir")
+        .join("appendonly.aof.1.incr.aof");
+
+    assert_eq!(std::fs::read(&file).unwrap(), b"");
+}
+
+#[test]
+fn records_under_the_names_it_was_given() {
     let data = Data::new();
     let _server = Server::start_with(&[
         "--dir",
@@ -63,9 +79,16 @@ fn records_under_the_name_it_was_given() {
         "yes",
         "--appenddirname",
         "my_aof_dir",
+        "--appendfilename",
+        "my_writes.aof",
     ]);
 
     assert!(data.holds("my_aof_dir").is_dir());
+    assert!(
+        data.holds("my_aof_dir")
+            .join("my_writes.aof.1.incr.aof")
+            .is_file()
+    );
     assert!(!data.holds("appendonlydir").exists());
 }
 
@@ -90,24 +113,26 @@ fn makes_nowhere_to_record_when_it_was_told_nothing() {
 }
 
 #[test]
-fn starts_over_a_directory_it_left_behind_last_time() {
+fn starts_over_what_it_left_behind_last_time() {
     let data = Data::new();
     let args = ["--dir", data.dir(), "--appendonly", "yes"];
+    let file = data
+        .holds("appendonlydir")
+        .join("appendonly.aof.1.incr.aof");
 
     let first = Server::start_with(&args);
-    std::fs::write(data.holds("appendonlydir").join("kept"), b"kept")
-        .expect("failed to leave something behind");
+    std::fs::write(&file, b"*1\r\n$4\r\nPING\r\n").expect("failed to record a command");
     drop(first);
 
     let second = Server::start_with(&args);
     let mut client = second.connect();
 
-    // A directory that is already there is what a restart finds, and the server
-    // takes it as it stands rather than refusing or sweeping it away.
+    // What is already there is what a restart finds, and the server takes it as
+    // it stands rather than refusing or sweeping it away.
     client.send(&["PING"]);
     client.expect_reply("+PONG\r\n");
 
-    assert!(data.holds("appendonlydir").join("kept").exists());
+    assert_eq!(std::fs::read(&file).unwrap(), b"*1\r\n$4\r\nPING\r\n");
 }
 
 #[test]
