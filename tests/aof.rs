@@ -231,6 +231,66 @@ fn records_one_write_after_another_in_the_order_they_came() {
 }
 
 #[test]
+fn records_the_writes_out_of_a_mix_and_leaves_the_rest() {
+    let data = Data::new();
+    data.left_recording_in("elsewhere.aof.1.incr.aof");
+
+    let server = Server::start_with(&[
+        "--dir",
+        data.dir(),
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "always",
+    ]);
+    let mut client = server.connect();
+
+    // A command that only looks at the store leaves it as it found it, so
+    // playing it back later would be so much wasted breath.
+    for command in [
+        ["SET", "foo", "1"].as_slice(),
+        ["GET", "foo"].as_slice(),
+        ["PING"].as_slice(),
+        ["ECHO", "hello"].as_slice(),
+        ["CONFIG", "GET", "appendonly"].as_slice(),
+        ["KEYS", "*"].as_slice(),
+        ["TYPE", "foo"].as_slice(),
+        ["SET", "bar", "2"].as_slice(),
+    ] {
+        client.send(command);
+        client.read_reply();
+    }
+
+    assert_eq!(
+        std::fs::read(data.records("elsewhere.aof.1.incr.aof")).unwrap(),
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n\
+          *3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n"
+    );
+}
+
+#[test]
+fn records_nothing_at_all_when_nothing_was_changed() {
+    let data = Data::new();
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    for command in [
+        ["GET", "nobody"].as_slice(),
+        ["PING"].as_slice(),
+        ["ECHO", "hello"].as_slice(),
+        ["LRANGE", "l", "0", "-1"].as_slice(),
+    ] {
+        client.send(command);
+        client.read_reply();
+    }
+
+    assert_eq!(
+        std::fs::read(data.records("appendonly.aof.1.incr.aof")).unwrap(),
+        b""
+    );
+}
+
+#[test]
 fn records_every_kind_of_write_it_knows() {
     let data = Data::new();
     let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
