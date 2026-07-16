@@ -1,6 +1,7 @@
 use crate::aof::Aof;
 use crate::config::Config;
 use crate::replicas::Replicas;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,8 +17,12 @@ pub struct Server {
     /// changed.
     pub replicas: Replicas,
     /// Where the writes are recorded as they happen, for a server keeping such
-    /// a record. `None` is a server that keeps none.
-    pub aof: Option<Aof>,
+    /// a record. Empty is a server that keeps none.
+    ///
+    /// It is taken up after the record has been played back, and not before: a
+    /// command read out of the file has no business being written straight back
+    /// into it.
+    pub aof: OnceLock<Aof>,
 }
 
 /// A server's place in the history of a dataset.
@@ -44,7 +49,7 @@ impl Replication {
 }
 
 impl Server {
-    pub fn new(config: Config, aof: Option<Aof>) -> Self {
+    pub fn new(config: Config) -> Self {
         Self {
             config,
             replication: Replication {
@@ -52,7 +57,7 @@ impl Server {
                 offset: AtomicU64::new(0),
             },
             replicas: Replicas::default(),
-            aof,
+            aof: OnceLock::new(),
         }
     }
 }
@@ -111,12 +116,12 @@ mod tests {
 
     #[test]
     fn starts_a_master_at_the_beginning_of_its_history() {
-        assert_eq!(Server::new(Config::default(), None).replication.offset(), 0);
+        assert_eq!(Server::new(Config::default()).replication.offset(), 0);
     }
 
     #[test]
     fn counts_the_history_it_hands_out() {
-        let server = Server::new(Config::default(), None);
+        let server = Server::new(Config::default());
 
         server.replication.advance(29);
         server.replication.advance(14);

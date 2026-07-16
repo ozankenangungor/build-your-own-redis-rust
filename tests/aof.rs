@@ -40,10 +40,15 @@ impl Data {
     /// Leaves a manifest and the empty file it names behind, as a server that
     /// had been running here would have.
     fn left_recording_in(&self, name: &str) {
+        self.left_recorded(name, b"");
+    }
+
+    /// The same, for a record that already holds these bytes.
+    fn left_recorded(&self, name: &str, recorded: &[u8]) {
         let dir = self.0.join("appendonlydir");
         std::fs::create_dir_all(&dir).expect("failed to make a directory to leave it in");
 
-        std::fs::write(dir.join(name), b"").expect("failed to leave a file behind");
+        std::fs::write(dir.join(name), recorded).expect("failed to leave a file behind");
         std::fs::write(
             dir.join("appendonly.aof.manifest"),
             format!("file {name} seq 1 type i\n"),
@@ -417,6 +422,114 @@ fn records_nothing_when_it_was_not_asked_to_record() {
     client.expect_reply("$3\r\n100\r\n");
 
     assert!(!data.holds("appendonlydir").exists());
+}
+
+#[test]
+fn comes_up_holding_what_the_recorded_command_put_there() {
+    let data = Data::new();
+
+    // The record names a file the settings would never have picked, which is
+    // the whole reason to read the manifest before replaying anything.
+    data.left_recorded(
+        "elsewhere.aof.1.incr.aof",
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n123\r\n",
+    );
+
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$3\r\n123\r\n");
+}
+
+#[test]
+fn does_not_record_again_what_it_has_just_played_back() {
+    let data = Data::new();
+    let recorded = b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n123\r\n";
+    data.left_recorded("elsewhere.aof.1.incr.aof", recorded);
+
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$3\r\n123\r\n");
+
+    // A command read out of the record and done again is not a new write. One
+    // written back would double with every restart.
+    assert_eq!(
+        std::fs::read(data.records("elsewhere.aof.1.incr.aof")).unwrap(),
+        recorded
+    );
+}
+
+#[test]
+fn goes_on_recording_after_what_it_played_back() {
+    let data = Data::new();
+    data.left_recorded(
+        "elsewhere.aof.1.incr.aof",
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n",
+    );
+
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    client.send(&["SET", "bar", "2"]);
+    client.expect_reply("+OK\r\n");
+
+    assert_eq!(
+        std::fs::read(data.records("elsewhere.aof.1.incr.aof")).unwrap(),
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n\
+          *3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n"
+    );
+}
+
+#[test]
+fn comes_up_where_the_last_run_left_off() {
+    let data = Data::new();
+    let args = ["--dir", data.dir(), "--appendonly", "yes"];
+
+    let first = Server::start_with(&args);
+    let mut client = first.connect();
+    client.send(&["SET", "foo", "123"]);
+    client.expect_reply("+OK\r\n");
+    drop(first);
+
+    // What one run wrote down is what the next comes up holding, which is what
+    // the record is for.
+    let second = Server::start_with(&args);
+    let mut client = second.connect();
+
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$3\r\n123\r\n");
+}
+
+#[test]
+fn comes_up_holding_nothing_over_a_record_with_nothing_in_it() {
+    let data = Data::new();
+    data.left_recording_in("elsewhere.aof.1.incr.aof");
+
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    client.send(&["KEYS", "*"]);
+    client.expect_reply("*0\r\n");
+}
+
+#[test]
+fn will_not_start_over_a_record_it_cannot_read_through() {
+    let data = Data::new();
+    data.left_recorded(
+        "elsewhere.aof.1.incr.aof",
+        b"*3\r\n$3\r\nSET\r\nnonsense\r\n",
+    );
+
+    // Coming up over a record it could not read would be coming up short of
+    // where the last run left off, and saying nothing about it.
+    let args = ["--port", "0", "--dir", data.dir(), "--appendonly", "yes"];
+    let output =
+        common::gives_up(&args, Duration::from_secs(10)).expect("the server came up and stayed up");
+
+    assert!(!output.status.success(), "the server started anyway");
 }
 
 #[test]

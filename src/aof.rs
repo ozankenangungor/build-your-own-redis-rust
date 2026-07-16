@@ -49,6 +49,43 @@ impl Aof {
         &self.path
     }
 
+    /// The commands recorded so far, in the order they were recorded.
+    ///
+    /// A record that ends mid-command is taken for what it is: the last write
+    /// of a server that was stopped in the middle of writing it down. The part
+    /// that arrived is dropped, since a command half written was a command
+    /// never answered. Anything else out of shape is refused, because a record
+    /// that cannot be read through is one whose later commands are lost.
+    pub fn recorded(&self) -> Result<Vec<Value>> {
+        let recorded = std::fs::read(&self.path)
+            .with_context(|| format!("reading {}", self.path.display()))?;
+
+        let mut commands = Vec::new();
+        let mut at = 0;
+
+        while at < recorded.len() {
+            let read = crate::resp::parse(&recorded[at..])
+                .with_context(|| format!("reading {} at byte {at}", self.path.display()))?;
+
+            match read {
+                Some((command, taken)) => {
+                    commands.push(command);
+                    at += taken;
+                }
+                None => {
+                    eprintln!(
+                        "{} ends mid-command, {} bytes in; leaving the rest of it",
+                        self.path.display(),
+                        recorded.len() - at,
+                    );
+                    break;
+                }
+            }
+        }
+
+        Ok(commands)
+    }
+
     /// Records one command, exactly as the client sent it.
     ///
     /// The command is written down before the caller replies, so that a client
@@ -555,6 +592,94 @@ mod tests {
         assert_eq!(
             std::fs::read(aof.path()).unwrap(),
             b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$4\r\n\r\n\x00\xff\r\n"
+        );
+    }
+
+    /// A server set up over a record that already holds these bytes.
+    fn over(somewhere: &Somewhere, recorded: &[u8]) -> Aof {
+        let dir = somewhere.0.join("appendonlydir");
+        std::fs::create_dir_all(&dir).expect("failed to make a directory to leave it in");
+        std::fs::write(dir.join("appendonly.aof.1.incr.aof"), recorded)
+            .expect("failed to leave a record behind");
+
+        prepare(&somewhere.config(true))
+            .unwrap()
+            .expect("a file was to be made")
+    }
+
+    #[test]
+    fn reads_back_nothing_from_a_record_with_nothing_in_it() {
+        let somewhere = Somewhere::new();
+
+        assert_eq!(over(&somewhere, b"").recorded().unwrap(), []);
+    }
+
+    #[test]
+    fn reads_back_the_one_command_a_record_holds() {
+        let somewhere = Somewhere::new();
+        let aof = over(&somewhere, b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n123\r\n");
+
+        assert_eq!(aof.recorded().unwrap(), [sent(&["SET", "foo", "123"])]);
+    }
+
+    #[test]
+    fn reads_back_the_commands_in_the_order_they_were_recorded() {
+        let somewhere = Somewhere::new();
+        let aof = over(
+            &somewhere,
+            b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n\
+              *2\r\n$4\r\nINCR\r\n$3\r\nfoo\r\n\
+              *3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n",
+        );
+
+        assert_eq!(
+            aof.recorded().unwrap(),
+            [
+                sent(&["SET", "foo", "1"]),
+                sent(&["INCR", "foo"]),
+                sent(&["SET", "bar", "2"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_off_a_command_the_record_stops_in_the_middle_of() {
+        let somewhere = Somewhere::new();
+
+        // A server stopped while writing a command down leaves part of it
+        // behind. A command half written was a command never answered, so what
+        // arrived of it is dropped rather than guessed at.
+        let aof = over(
+            &somewhere,
+            b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n*3\r\n$3\r\nSET\r\n$3\r\nba",
+        );
+
+        assert_eq!(aof.recorded().unwrap(), [sent(&["SET", "foo", "1"])]);
+    }
+
+    #[test]
+    fn says_so_when_a_record_cannot_be_read_through() {
+        let somewhere = Somewhere::new();
+
+        // Not a partial command but a wrong one, which says nothing about where
+        // the next begins: everything recorded after it would be lost.
+        let aof = over(&somewhere, b"*3\r\n$3\r\nSET\r\nnonsense\r\n");
+
+        assert!(aof.recorded().is_err());
+    }
+
+    #[tokio::test]
+    async fn reads_back_what_it_has_just_recorded() {
+        let somewhere = Somewhere::new();
+        let config = somewhere.config(true);
+        let aof = prepare(&config).unwrap().expect("a file was to be made");
+
+        aof.record(&sent(&["SET", "foo", "1"])).await.unwrap();
+        aof.record(&sent(&["SET", "bar", "2"])).await.unwrap();
+
+        assert_eq!(
+            aof.recorded().unwrap(),
+            [sent(&["SET", "foo", "1"]), sent(&["SET", "bar", "2"])]
         );
     }
 

@@ -11,11 +11,41 @@ mod server;
 mod store;
 
 use anyhow::Result;
+use commands::{Answer, Transaction};
 use config::Config;
+use resp::Value;
 use server::Server;
 use std::sync::Arc;
 use store::Store;
 use tokio::net::TcpListener;
+
+/// Does again what the recorded commands did, and says how many were done.
+///
+/// They are run as though a client had just sent them, which is the whole point
+/// of keeping them word for word: whatever a command meant when it arrived, it
+/// means the same here.
+///
+/// A command that comes back with an error is said aloud and passed over. It is
+/// worth knowing about, since a record is written from commands that worked, but
+/// stopping over one would cost every write recorded after it.
+async fn replay(recorded: Vec<Value>, store: &Store, server: &Server) -> usize {
+    // The transaction stands in for the connection a client would have had.
+    // Nothing recorded ever opens one, since a transaction is written down as
+    // the commands it ran rather than as itself.
+    let mut transaction = Transaction::default();
+    let mut replayed = 0;
+
+    for command in recorded {
+        match commands::run(command, store, &mut transaction, server).await {
+            Answer::Reply(Value::Error(said)) => {
+                eprintln!("a recorded command was refused: {said}")
+            }
+            _ => replayed += 1,
+        }
+    }
+
+    replayed
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,11 +62,19 @@ async fn main() -> Result<()> {
     // A server that records what it does needs somewhere to record it, and
     // needs it before the first client, not before the first write.
     let aof = aof::prepare(&config)?;
-    if let Some(aof) = &aof {
-        eprintln!("recording writes in {}", aof.path().display());
-    }
+    let server = Arc::new(Server::new(config));
 
-    let server = Arc::new(Server::new(config, aof));
+    // What was recorded last time is done again, in the order it was done in,
+    // which leaves the store where the last run left it. The record is only
+    // taken up afterwards: a command played back out of the file has no
+    // business being written straight back into it.
+    if let Some(aof) = aof {
+        let replayed = replay(aof.recorded()?, &store, &server).await;
+        eprintln!("replayed {replayed} recorded commands");
+
+        eprintln!("recording writes in {}", aof.path().display());
+        let _ = server.aof.set(aof);
+    }
 
     let listener = TcpListener::bind(("127.0.0.1", server.config.port)).await?;
 

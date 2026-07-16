@@ -113,7 +113,7 @@ async fn dispatch(
 
     // The record of the write is made before its reply goes out, so that a
     // client is never told a write took when nothing knows of it but memory.
-    if let Some(aof) = &server.aof
+    if let Some(aof) = server.aof.get()
         && let Err(e) = aof.record(&as_sent).await
     {
         eprintln!("could not record a command: {e:#}");
