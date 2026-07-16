@@ -202,6 +202,115 @@ fn records_a_write_in_the_file_the_manifest_names() {
 }
 
 #[test]
+fn records_one_write_after_another_in_the_order_they_came() {
+    let data = Data::new();
+    data.left_recording_in("elsewhere.aof.1.incr.aof");
+
+    let server = Server::start_with(&[
+        "--dir",
+        data.dir(),
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "always",
+    ]);
+    let mut client = server.connect();
+
+    client.send(&["SET", "foo", "100"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "bar", "200"]);
+    client.expect_reply("+OK\r\n");
+
+    // One command straight after the other, with nothing between them: the RESP
+    // framing is what says where one ends and the next begins.
+    assert_eq!(
+        std::fs::read(data.records("elsewhere.aof.1.incr.aof")).unwrap(),
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n100\r\n\
+          *3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$3\r\n200\r\n"
+    );
+}
+
+#[test]
+fn records_every_kind_of_write_it_knows() {
+    let data = Data::new();
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    // Whatever leaves the store different from how it found it belongs in the
+    // record, not `SET` alone.
+    for command in [
+        ["SET", "n", "1"].as_slice(),
+        ["INCR", "n"].as_slice(),
+        ["RPUSH", "l", "a"].as_slice(),
+        ["LPOP", "l"].as_slice(),
+    ] {
+        client.send(command);
+        client.read_reply();
+    }
+
+    assert_eq!(
+        std::fs::read(data.records("appendonly.aof.1.incr.aof")).unwrap(),
+        b"*3\r\n$3\r\nSET\r\n$1\r\nn\r\n$1\r\n1\r\n\
+          *2\r\n$4\r\nINCR\r\n$1\r\nn\r\n\
+          *3\r\n$5\r\nRPUSH\r\n$1\r\nl\r\n$1\r\na\r\n\
+          *2\r\n$4\r\nLPOP\r\n$1\r\nl\r\n"
+    );
+}
+
+#[test]
+fn records_the_writes_of_one_client_after_those_of_another() {
+    let data = Data::new();
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut first = server.connect();
+    let mut second = server.connect();
+
+    // Each is answered before the next is sent, so the order they arrived in is
+    // not in doubt, and it is the order the record is to keep them in.
+    first.send(&["SET", "foo", "1"]);
+    first.expect_reply("+OK\r\n");
+    second.send(&["SET", "bar", "2"]);
+    second.expect_reply("+OK\r\n");
+    first.send(&["SET", "baz", "3"]);
+    first.expect_reply("+OK\r\n");
+
+    assert_eq!(
+        std::fs::read(data.records("appendonly.aof.1.incr.aof")).unwrap(),
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n\
+          *3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n\
+          *3\r\n$3\r\nSET\r\n$3\r\nbaz\r\n$1\r\n3\r\n"
+    );
+}
+
+#[test]
+fn records_the_writes_a_transaction_held_back_when_it_lets_them_go() {
+    let data = Data::new();
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    client.send(&["MULTI"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["SET", "foo", "1"]);
+    client.expect_reply("+QUEUED\r\n");
+
+    // Nothing has happened to the store yet, so there is nothing to record yet.
+    assert_eq!(
+        std::fs::read(data.records("appendonly.aof.1.incr.aof")).unwrap(),
+        b""
+    );
+
+    client.send(&["SET", "bar", "2"]);
+    client.expect_reply("+QUEUED\r\n");
+    client.send(&["EXEC"]);
+    client.read_reply();
+
+    assert_eq!(
+        std::fs::read(data.records("appendonly.aof.1.incr.aof")).unwrap(),
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n\
+          *3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n"
+    );
+}
+
+#[test]
 fn records_a_write_the_client_asked_for_word_for_word() {
     let data = Data::new();
     let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
