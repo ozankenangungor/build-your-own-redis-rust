@@ -443,6 +443,88 @@ fn comes_up_holding_what_the_recorded_command_put_there() {
 }
 
 #[test]
+fn comes_up_holding_what_every_recorded_command_put_there() {
+    let data = Data::new();
+    data.left_recorded(
+        "elsewhere.aof.1.incr.aof",
+        b"*3\r\n$3\r\nSET\r\n$4\r\nkey1\r\n$6\r\nvalue1\r\n\
+          *3\r\n$3\r\nSET\r\n$4\r\nkey2\r\n$6\r\nvalue2\r\n\
+          *3\r\n$3\r\nSET\r\n$4\r\nkey3\r\n$6\r\nvalue3\r\n",
+    );
+
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    // Every command in the file, not the first alone.
+    for (key, value) in [("key1", "value1"), ("key2", "value2"), ("key3", "value3")] {
+        client.send(&["GET", key]);
+        client.expect_reply(&format!("$6\r\n{value}\r\n"));
+    }
+}
+
+#[test]
+fn comes_up_where_the_recorded_commands_left_off_between_them() {
+    let data = Data::new();
+    data.left_recorded(
+        "elsewhere.aof.1.incr.aof",
+        b"*3\r\n$3\r\nSET\r\n$1\r\nn\r\n$1\r\n5\r\n\
+          *2\r\n$4\r\nINCR\r\n$1\r\nn\r\n\
+          *2\r\n$4\r\nINCR\r\n$1\r\nn\r\n\
+          *4\r\n$5\r\nRPUSH\r\n$1\r\nl\r\n$1\r\na\r\n$1\r\nb\r\n\
+          *2\r\n$4\r\nLPOP\r\n$1\r\nl\r\n",
+    );
+
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    // Each command is done against what the ones before it left, so what comes
+    // up is the sum of them rather than any one of them.
+    client.send(&["GET", "n"]);
+    client.expect_reply("$1\r\n7\r\n");
+
+    client.send(&["LRANGE", "l", "0", "-1"]);
+    client.expect_reply("*1\r\n$1\r\nb\r\n");
+}
+
+#[test]
+fn comes_up_holding_the_last_word_on_a_key_recorded_twice() {
+    let data = Data::new();
+    data.left_recorded(
+        "elsewhere.aof.1.incr.aof",
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$5\r\nfirst\r\n\
+          *3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$4\r\nlast\r\n",
+    );
+
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    // Played back in the order recorded, so the later write is the one standing.
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$4\r\nlast\r\n");
+}
+
+#[test]
+fn leaves_off_the_command_a_record_stops_in_the_middle_of() {
+    let data = Data::new();
+    data.left_recorded(
+        "elsewhere.aof.1.incr.aof",
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n\
+          *3\r\n$3\r\nSET\r\n$3\r\nba",
+    );
+
+    // A server stopped while writing a command down leaves part of it behind.
+    // What arrived of it was never answered, so it is dropped and the rest of
+    // the record still stands.
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    client.send(&["GET", "foo"]);
+    client.expect_reply("$1\r\n1\r\n");
+    client.send(&["KEYS", "*"]);
+    client.expect_reply("*1\r\n$3\r\nfoo\r\n");
+}
+
+#[test]
 fn does_not_record_again_what_it_has_just_played_back() {
     let data = Data::new();
     let recorded = b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\n123\r\n";
