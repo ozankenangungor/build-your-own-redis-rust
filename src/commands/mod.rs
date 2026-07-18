@@ -1,12 +1,14 @@
 mod info;
 mod keys;
 mod lists;
+mod pubsub;
 mod replication;
 mod settings;
 mod streams;
 mod strings;
 mod transactions;
 
+pub use pubsub::Subscriptions;
 pub use transactions::Transaction;
 
 use crate::resp::Value;
@@ -38,6 +40,7 @@ pub async fn run(
     command: Value,
     store: &Store,
     transaction: &mut Transaction,
+    subscriptions: &mut Subscriptions,
     server: &Server,
 ) -> Answer {
     let command = match Command::parse(command) {
@@ -56,8 +59,10 @@ pub async fn run(
 
     let reply = match transactions::steer(&command, transaction, store) {
         Some(Outcome::Reply(reply)) => reply,
-        Some(Outcome::Execute(queued)) => execute(queued, store, transaction, server).await,
-        None => dispatch(&command, store, transaction, server).await,
+        Some(Outcome::Execute(queued)) => {
+            execute(queued, store, transaction, subscriptions, server).await
+        }
+        None => dispatch(&command, store, transaction, subscriptions, server).await,
     };
 
     // A replica that has been handed the dataset is no longer a client. What
@@ -80,12 +85,13 @@ async fn execute(
     queued: Vec<Command>,
     store: &Store,
     transaction: &mut Transaction,
+    subscriptions: &mut Subscriptions,
     server: &Server,
 ) -> Value {
     let mut replies = Vec::with_capacity(queued.len());
 
     for command in &queued {
-        replies.push(dispatch(command, store, transaction, server).await);
+        replies.push(dispatch(command, store, transaction, subscriptions, server).await);
     }
 
     Value::Array(replies)
@@ -99,9 +105,10 @@ async fn dispatch(
     command: &Command,
     store: &Store,
     transaction: &mut Transaction,
+    subscriptions: &mut Subscriptions,
     server: &Server,
 ) -> Value {
-    let reply = run_against(command, store, transaction, server).await;
+    let reply = run_against(command, store, transaction, subscriptions, server).await;
 
     // A command that changed nothing is nothing to pass on or write down, and
     // one that failed changed nothing.
@@ -135,6 +142,7 @@ async fn run_against(
     command: &Command,
     store: &Store,
     transaction: &mut Transaction,
+    subscriptions: &mut Subscriptions,
     server: &Server,
 ) -> Value {
     let Command {
@@ -156,6 +164,9 @@ async fn run_against(
         return reply;
     }
     if let Some(reply) = keys::run(uppercased, args, store) {
+        return reply;
+    }
+    if let Some(reply) = pubsub::run(uppercased, args, subscriptions) {
         return reply;
     }
     if let Some(reply) = info::run(uppercased, args, server) {

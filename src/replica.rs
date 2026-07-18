@@ -1,4 +1,4 @@
-use crate::commands::{self, Transaction};
+use crate::commands::{self, Subscriptions, Transaction};
 use crate::config::Master;
 use crate::resp::{self, Value};
 use crate::server::Server;
@@ -150,6 +150,7 @@ impl Conversation {
         // A master could open a transaction as any client could, so the
         // connection keeps one the way every other connection does.
         let mut transaction = Transaction::default();
+        let mut subscriptions = Subscriptions::default();
         // How far along the master's history this replica is. It starts where
         // the handover left off, so that what it reports and what the master
         // counts are the same numbers.
@@ -165,7 +166,14 @@ impl Conversation {
                     .write_all(&as_command(&["REPLCONF", "ACK", &offset.to_string()]).encode())
                     .await?;
             } else {
-                commands::run(command, &store, &mut transaction, server).await;
+                commands::run(
+                    command,
+                    &store,
+                    &mut transaction,
+                    &mut subscriptions,
+                    server,
+                )
+                .await;
             }
 
             // Counted after the fact, so that what a replica reports is how far

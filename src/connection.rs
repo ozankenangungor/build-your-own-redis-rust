@@ -1,4 +1,4 @@
-use crate::commands::{Answer, Transaction};
+use crate::commands::{Answer, Subscriptions, Transaction};
 use crate::replicas::Following;
 use crate::resp::Value;
 use crate::server::Server;
@@ -21,6 +21,9 @@ pub async fn serve(
     // The transaction lives as long as this connection and no longer, so a
     // client that hangs up mid-transaction leaves nothing behind.
     let mut transaction = Transaction::default();
+    // The same goes for the channels this client listens on: they are the
+    // client's, not the server's, and go when it does.
+    let mut subscriptions = Subscriptions::default();
 
     loop {
         if stream.read_buf(&mut buf).await? == 0 {
@@ -34,7 +37,14 @@ pub async fn serve(
                 Ok(None) => break,
                 Ok(Some((command, consumed))) => {
                     buf.advance(consumed);
-                    commands::run(command, &store, &mut transaction, server).await
+                    commands::run(
+                        command,
+                        &store,
+                        &mut transaction,
+                        &mut subscriptions,
+                        server,
+                    )
+                    .await
                 }
                 // Malformed input leaves the stream out of step, with no way to
                 // tell where the next command starts, so say so and hang up.
