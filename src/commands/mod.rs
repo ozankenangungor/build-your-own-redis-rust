@@ -48,6 +48,14 @@ pub async fn run(
         Err(reply) => return Answer::Reply(reply),
     };
 
+    // A client listening on a channel is in a conversation of another kind, and
+    // only the commands that steer that conversation are open to it. This comes
+    // before anything else so that nothing is queued or run that the client was
+    // in no position to ask for.
+    if subscriptions.listening() && !pubsub::allowed_while_listening(&command.uppercased) {
+        return Answer::Reply(pubsub::out_of_context(&command.uppercased));
+    }
+
     // Inside a transaction a command is only written down. Nothing runs until
     // `EXEC`, so the store must not see it yet.
     if !transactions::steers_a_transaction(&command.uppercased)

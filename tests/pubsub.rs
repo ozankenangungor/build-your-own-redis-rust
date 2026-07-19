@@ -147,3 +147,90 @@ fn keeps_serving_the_connection_after_a_subscribe() {
     client.send(&["PING"]);
     client.expect_reply("+PONG\r\n");
 }
+
+#[test]
+fn will_not_run_a_command_for_a_client_that_is_listening() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.expect_reply("*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+
+    for (command, refused) in [
+        (["SET", "key", "value"].as_slice(), "set"),
+        (["GET", "key"].as_slice(), "get"),
+        (["ECHO", "hey"].as_slice(), "echo"),
+    ] {
+        client.send(command);
+        let said = client.read_line();
+
+        assert!(
+            said.starts_with(&format!("-ERR Can't execute '{refused}': ")),
+            "{said:?}"
+        );
+    }
+}
+
+#[test]
+fn goes_on_taking_channels_from_a_client_that_is_listening() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.expect_reply("*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+
+    // Listening is not the end of the conversation, only a turn in it: the
+    // commands that steer it answer as they always did.
+    client.send(&["SUBSCRIBE", "bar"]);
+    client.expect_reply("*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:2\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+PONG\r\n");
+}
+
+#[test]
+fn goes_on_serving_the_clients_that_are_not_listening() {
+    let server = Server::start();
+    let mut listening = server.connect();
+    let mut asking = server.connect();
+
+    listening.send(&["SUBSCRIBE", "foo"]);
+    listening.read_reply();
+
+    // One client listening says nothing about what another may ask for.
+    asking.send(&["SET", "key", "value"]);
+    asking.expect_reply("+OK\r\n");
+    asking.send(&["GET", "key"]);
+    asking.expect_reply("$5\r\nvalue\r\n");
+}
+
+#[test]
+fn will_not_open_a_transaction_for_a_client_that_is_listening() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.read_reply();
+
+    // Nothing is queued either, since queuing a command is running it later.
+    client.send(&["MULTI"]);
+    let said = client.read_line();
+
+    assert!(said.starts_with("-ERR Can't execute 'multi': "), "{said:?}");
+}
+
+#[test]
+fn will_not_run_a_command_it_does_not_know_for_a_listening_client() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.read_reply();
+
+    client.send(&["NONSENSE"]);
+    let said = client.read_line();
+
+    assert!(
+        said.starts_with("-ERR Can't execute 'nonsense': "),
+        "{said:?}"
+    );
+}

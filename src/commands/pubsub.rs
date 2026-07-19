@@ -2,6 +2,21 @@ use super::wrong_arity;
 use crate::resp::Value;
 use bytes::Bytes;
 
+/// The commands a client may still use once it is listening on a channel.
+///
+/// The list is Redis's, and includes commands this server has yet to learn:
+/// what a listening client may ask for does not depend on which of them have
+/// been written, and one it does not know will say so for itself.
+const ALLOWED_WHILE_LISTENING: &[&str] = &[
+    "SUBSCRIBE",
+    "UNSUBSCRIBE",
+    "PSUBSCRIBE",
+    "PUNSUBSCRIBE",
+    "PING",
+    "QUIT",
+    "RESET",
+];
+
 /// The channels one client is listening on.
 ///
 /// This belongs to the connection rather than to the server: subscribing is
@@ -10,6 +25,15 @@ use bytes::Bytes;
 pub struct Subscriptions(Vec<Bytes>);
 
 impl Subscriptions {
+    /// Whether this client is listening on anything at all.
+    ///
+    /// A client that is has gone from asking a server questions to waiting on
+    /// what others say, and most of what it could ask before is closed to it
+    /// until it stops listening.
+    pub fn listening(&self) -> bool {
+        !self.0.is_empty()
+    }
+
     /// Takes on a channel and says how many this client is then listening on.
     ///
     /// Subscribing twice to the one channel leaves it listening once, as it was
@@ -42,6 +66,23 @@ pub fn run(command: &str, args: &[Bytes], subscriptions: &mut Subscriptions) -> 
     };
 
     Some(reply)
+}
+
+/// Whether a client listening on a channel may still use this command.
+pub fn allowed_while_listening(command: &str) -> bool {
+    ALLOWED_WHILE_LISTENING.contains(&command)
+}
+
+/// What a listening client is told when it asks for something it may not have
+/// while it listens.
+///
+/// The command is named as Redis names it rather than as it was spelled, since
+/// what is being refused is the command, not the asking.
+pub fn out_of_context(command: &str) -> Value {
+    Value::Error(format!(
+        "ERR Can't execute '{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
+        command.to_lowercase()
+    ))
 }
 
 /// What a client is told when it has been put on a channel: what happened, the
@@ -133,6 +174,48 @@ mod tests {
             subscribe(&[], &mut subscriptions),
             Value::Error("ERR wrong number of arguments for 'subscribe' command".into())
         );
+    }
+
+    #[test]
+    fn is_listening_to_nothing_until_it_is_asked_to_listen() {
+        let mut subscriptions = Subscriptions::default();
+
+        assert!(!subscriptions.listening());
+
+        subscribe(&["foo"], &mut subscriptions);
+        assert!(subscriptions.listening());
+    }
+
+    #[test]
+    fn leaves_open_the_commands_that_steer_the_listening() {
+        for command in [
+            "SUBSCRIBE",
+            "UNSUBSCRIBE",
+            "PSUBSCRIBE",
+            "PUNSUBSCRIBE",
+            "PING",
+            "QUIT",
+            "RESET",
+        ] {
+            assert!(allowed_while_listening(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn closes_off_the_commands_that_ask_the_server_something() {
+        for command in ["GET", "SET", "ECHO", "MULTI", "EXEC", "KEYS", "PUBLISH"] {
+            assert!(!allowed_while_listening(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn names_the_command_it_will_not_run_the_way_redis_names_it() {
+        let Value::Error(said) = out_of_context("ECHO") else {
+            panic!("a refusal is an error");
+        };
+
+        assert!(said.starts_with("ERR Can't execute 'echo': "), "{said:?}");
+        assert!(said.ends_with("are allowed in this context"), "{said:?}");
     }
 
     #[test]
