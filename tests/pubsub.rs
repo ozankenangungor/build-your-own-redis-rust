@@ -50,6 +50,49 @@ fn leaves_the_count_where_it_was_on_a_channel_it_is_already_on() {
 }
 
 #[test]
+fn counts_the_channels_of_each_of_several_clients_apart() {
+    let server = Server::start();
+
+    // Each client is asked the same and answered the same, whatever the ones
+    // before it were told: the count belongs to the client, not the server.
+    for _ in 0..3 {
+        let mut client = server.connect();
+
+        client.send(&["SUBSCRIBE", "foo"]);
+        client.expect_reply("*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+        client.send(&["SUBSCRIBE", "bar"]);
+        client.expect_reply("*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:2\r\n");
+        client.send(&["SUBSCRIBE", "bar"]);
+        client.expect_reply("*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:2\r\n");
+        client.send(&["SUBSCRIBE", "baz"]);
+        client.expect_reply("*3\r\n$9\r\nsubscribe\r\n$3\r\nbaz\r\n:3\r\n");
+    }
+}
+
+#[test]
+fn counts_a_channel_it_is_already_on_without_losing_its_place() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    // Asking again for a channel it already has changes nothing, and the next
+    // new one carries on from where the count stood.
+    for (channel, count) in [
+        ("foo", 1),
+        ("bar", 2),
+        ("foo", 2),
+        ("bar", 2),
+        ("baz", 3),
+        ("baz", 3),
+    ] {
+        client.send(&["SUBSCRIBE", channel]);
+        client.expect_reply(&format!(
+            "*3\r\n$9\r\nsubscribe\r\n${}\r\n{channel}\r\n:{count}\r\n",
+            channel.len()
+        ));
+    }
+}
+
+#[test]
 fn accepts_any_casing_of_the_command() {
     let server = Server::start();
 
