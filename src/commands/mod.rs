@@ -162,6 +162,11 @@ async fn run_against(
     if let Some(reply) = transactions::run(uppercased, args, transaction) {
         return reply;
     }
+    // Before the rest, since a client that is listening is answered differently
+    // on a command another module would otherwise claim.
+    if let Some(reply) = pubsub::run(uppercased, args, subscriptions) {
+        return reply;
+    }
     if let Some(reply) = strings::run(uppercased, args, store) {
         return reply;
     }
@@ -172,9 +177,6 @@ async fn run_against(
         return reply;
     }
     if let Some(reply) = keys::run(uppercased, args, store) {
-        return reply;
-    }
-    if let Some(reply) = pubsub::run(uppercased, args, subscriptions) {
         return reply;
     }
     if let Some(reply) = info::run(uppercased, args, server) {

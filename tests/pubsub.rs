@@ -145,7 +145,40 @@ fn keeps_serving_the_connection_after_a_subscribe() {
     client.read_reply();
 
     client.send(&["PING"]);
+    client.expect_reply("*2\r\n$4\r\npong\r\n$0\r\n\r\n");
+}
+
+#[test]
+fn answers_a_ping_differently_depending_on_who_is_asking() {
+    let server = Server::start();
+    let mut listening = server.connect();
+    let mut asking = server.connect();
+
+    // A listening client hears back in the shape everything else on its
+    // connection arrives in, so one reader can make sense of them all.
+    listening.send(&["SUBSCRIBE", "foo"]);
+    listening.read_reply();
+    listening.send(&["PING"]);
+    listening.expect_reply("*2\r\n$4\r\npong\r\n$0\r\n\r\n");
+
+    // A client that is not listening is answered as it always was.
+    asking.send(&["PING"]);
+    asking.expect_reply("+PONG\r\n");
+}
+
+#[test]
+fn answers_a_ping_the_old_way_until_the_client_starts_listening() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["PING"]);
     client.expect_reply("+PONG\r\n");
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.read_reply();
+
+    client.send(&["PING"]);
+    client.expect_reply("*2\r\n$4\r\npong\r\n$0\r\n\r\n");
 }
 
 #[test]
@@ -184,7 +217,7 @@ fn goes_on_taking_channels_from_a_client_that_is_listening() {
     client.send(&["SUBSCRIBE", "bar"]);
     client.expect_reply("*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:2\r\n");
     client.send(&["PING"]);
-    client.expect_reply("+PONG\r\n");
+    client.expect_reply("*2\r\n$4\r\npong\r\n$0\r\n\r\n");
 }
 
 #[test]

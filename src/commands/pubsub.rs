@@ -62,6 +62,14 @@ pub fn run(command: &str, args: &[Bytes], subscriptions: &mut Subscriptions) -> 
                     .collect(),
             ),
         },
+        // A listening client hears back in the shape everything else on the
+        // connection arrives in, so that one reader can make sense of them all.
+        // A client that is not listening is left to the module that has always
+        // answered it.
+        "PING" if subscriptions.listening() => Value::Array(vec![
+            Value::BulkString(Bytes::from_static(b"pong")),
+            Value::BulkString(Bytes::new()),
+        ]),
         _ => return None,
     };
 
@@ -174,6 +182,23 @@ mod tests {
             subscribe(&[], &mut subscriptions),
             Value::Error("ERR wrong number of arguments for 'subscribe' command".into())
         );
+    }
+
+    #[test]
+    fn leaves_a_ping_from_a_client_that_is_not_listening_to_another_module() {
+        let mut subscriptions = Subscriptions::default();
+
+        assert!(run("PING", &[], &mut subscriptions).is_none());
+    }
+
+    #[test]
+    fn answers_a_ping_from_a_listening_client_the_way_it_hears_everything_else() {
+        let mut subscriptions = Subscriptions::default();
+        subscribe(&["foo"], &mut subscriptions);
+
+        let reply = run("PING", &[], &mut subscriptions).expect("a listening client is answered");
+
+        assert_eq!(reply.encode(), b"*2\r\n$4\r\npong\r\n$0\r\n\r\n");
     }
 
     #[test]
