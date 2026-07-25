@@ -1,4 +1,5 @@
 use super::wrong_arity;
+use crate::channels::Channels;
 use crate::resp::Value;
 use bytes::Bytes;
 
@@ -21,17 +22,30 @@ const ALLOWED_WHILE_LISTENING: &[&str] = &[
 ///
 /// This belongs to the connection rather than to the server: subscribing is
 /// something a client does, and it lasts exactly as long as the client does.
+/// The server's own tally is kept up to date from here, arriving and leaving
+/// alike, so that what a publisher is told is what is really there.
 #[derive(Default)]
-pub struct Subscriptions(Vec<Bytes>);
+pub struct Subscriptions {
+    on: Vec<Bytes>,
+    channels: Channels,
+}
 
 impl Subscriptions {
+    /// The channels of a client on this server.
+    pub fn of(channels: Channels) -> Self {
+        Self {
+            on: Vec::new(),
+            channels,
+        }
+    }
+
     /// Whether this client is listening on anything at all.
     ///
     /// A client that is has gone from asking a server questions to waiting on
     /// what others say, and most of what it could ask before is closed to it
     /// until it stops listening.
     pub fn listening(&self) -> bool {
-        !self.0.is_empty()
+        !self.on.is_empty()
     }
 
     /// Takes on a channel and says how many this client is then listening on.
@@ -39,18 +53,41 @@ impl Subscriptions {
     /// Subscribing twice to the one channel leaves it listening once, as it was
     /// already: Redis counts channels, not the asking.
     fn add(&mut self, channel: &Bytes) -> usize {
-        if !self.0.contains(channel) {
-            self.0.push(channel.clone());
+        if !self.on.contains(channel) {
+            self.on.push(channel.clone());
+            self.channels.joined(channel);
         }
 
-        self.0.len()
+        self.on.len()
     }
 }
 
-/// Handles the commands a client uses to listen for what others have to say.
-/// `None` means the command belongs to another module.
-pub fn run(command: &str, args: &[Bytes], subscriptions: &mut Subscriptions) -> Option<Value> {
+impl Drop for Subscriptions {
+    fn drop(&mut self) {
+        // A client that has gone is listening to nothing, whether it said so or
+        // simply hung up.
+        for channel in &self.on {
+            self.channels.left(channel);
+        }
+    }
+}
+
+/// Handles the commands a client uses to listen for what others have to say,
+/// and to say something itself. `None` means the command belongs to another
+/// module.
+pub fn run(
+    command: &str,
+    args: &[Bytes],
+    subscriptions: &mut Subscriptions,
+    channels: &Channels,
+) -> Option<Value> {
     let reply = match command {
+        // How far the message reached, counted as it goes out. Carrying it to
+        // those listening is the connection's own work, and still to come.
+        "PUBLISH" => match args {
+            [channel, _message] => Value::Integer(channels.listening_to(channel) as i64),
+            _ => wrong_arity("publish"),
+        },
         // Each channel is confirmed on its own, in the order it was named, and
         // the count climbs as they are taken on one by one.
         "SUBSCRIBE" => match args {
@@ -107,13 +144,16 @@ fn listening(channel: &Bytes, count: usize) -> Value {
 mod tests {
     use super::*;
 
-    fn subscribe(channels: &[&str], subscriptions: &mut Subscriptions) -> Value {
-        let channels: Vec<Bytes> = channels
-            .iter()
-            .map(|channel| Bytes::copy_from_slice(channel.as_bytes()))
-            .collect();
+    fn named(channel: &str) -> Bytes {
+        Bytes::copy_from_slice(channel.as_bytes())
+    }
 
-        run("SUBSCRIBE", &channels, subscriptions).expect("subscribe belongs to this module")
+    fn subscribe(channels: &[&str], subscriptions: &mut Subscriptions) -> Value {
+        let named: Vec<Bytes> = channels.iter().copied().map(named).collect();
+        let listening = subscriptions.channels.clone();
+
+        run("SUBSCRIBE", &named, subscriptions, &listening)
+            .expect("subscribe belongs to this module")
     }
 
     #[test]
@@ -184,11 +224,94 @@ mod tests {
         );
     }
 
+    fn publish(channel: &str, channels: &Channels) -> Value {
+        let mut nobody = Subscriptions::default();
+        let args = [named(channel), named("hello")];
+
+        run("PUBLISH", &args, &mut nobody, channels).expect("publish belongs to this module")
+    }
+
+    #[test]
+    fn tells_a_publisher_how_many_are_listening() {
+        let channels = Channels::default();
+        let mut mine = Subscriptions::of(channels.clone());
+        let mut yours = Subscriptions::of(channels.clone());
+
+        assert_eq!(publish("foo", &channels), Value::Integer(0));
+
+        subscribe(&["foo"], &mut mine);
+        assert_eq!(publish("foo", &channels), Value::Integer(1));
+
+        subscribe(&["foo"], &mut yours);
+        assert_eq!(publish("foo", &channels), Value::Integer(2));
+    }
+
+    #[test]
+    fn counts_only_those_listening_on_the_channel_published_to() {
+        let channels = Channels::default();
+        let mut client = Subscriptions::of(channels.clone());
+
+        subscribe(&["foo", "bar"], &mut client);
+
+        assert_eq!(publish("foo", &channels), Value::Integer(1));
+        assert_eq!(publish("bar", &channels), Value::Integer(1));
+        assert_eq!(publish("baz", &channels), Value::Integer(0));
+    }
+
+    #[test]
+    fn counts_a_client_on_a_channel_once_however_often_it_asked() {
+        let channels = Channels::default();
+        let mut client = Subscriptions::of(channels.clone());
+
+        subscribe(&["foo"], &mut client);
+        subscribe(&["foo"], &mut client);
+
+        assert_eq!(publish("foo", &channels), Value::Integer(1));
+    }
+
+    #[test]
+    fn stops_counting_a_client_that_has_gone() {
+        let channels = Channels::default();
+        let mut staying = Subscriptions::of(channels.clone());
+
+        subscribe(&["foo"], &mut staying);
+        {
+            let mut leaving = Subscriptions::of(channels.clone());
+            subscribe(&["foo"], &mut leaving);
+
+            assert_eq!(publish("foo", &channels), Value::Integer(2));
+        }
+
+        // A client that has hung up is listening to nothing, and a publisher
+        // told otherwise would be told a message reached further than it did.
+        assert_eq!(publish("foo", &channels), Value::Integer(1));
+    }
+
+    #[test]
+    fn refuses_a_publish_that_is_missing_a_channel_or_a_message() {
+        let channels = Channels::default();
+        let mut nobody = Subscriptions::default();
+
+        for args in [
+            vec![],
+            vec![named("foo")],
+            vec![named("a"), named("b"), named("c")],
+        ] {
+            assert_eq!(
+                run("PUBLISH", &args, &mut nobody, &channels),
+                Some(Value::Error(
+                    "ERR wrong number of arguments for 'publish' command".into()
+                )),
+                "{args:?}"
+            );
+        }
+    }
+
     #[test]
     fn leaves_a_ping_from_a_client_that_is_not_listening_to_another_module() {
         let mut subscriptions = Subscriptions::default();
 
-        assert!(run("PING", &[], &mut subscriptions).is_none());
+        assert!(run("PING", &[], &mut subscriptions, &Channels::default()).is_none());
     }
 
     #[test]
@@ -196,7 +319,8 @@ mod tests {
         let mut subscriptions = Subscriptions::default();
         subscribe(&["foo"], &mut subscriptions);
 
-        let reply = run("PING", &[], &mut subscriptions).expect("a listening client is answered");
+        let reply = run("PING", &[], &mut subscriptions, &Channels::default())
+            .expect("a listening client is answered");
 
         assert_eq!(reply.encode(), b"*2\r\n$4\r\npong\r\n$0\r\n\r\n");
     }
@@ -247,6 +371,6 @@ mod tests {
     fn leaves_alone_the_commands_that_are_not_its_own() {
         let mut subscriptions = Subscriptions::default();
 
-        assert!(run("GET", &[], &mut subscriptions).is_none());
+        assert!(run("GET", &[], &mut subscriptions, &Channels::default()).is_none());
     }
 }

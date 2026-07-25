@@ -1,4 +1,5 @@
 mod aof;
+mod channels;
 mod commands;
 mod config;
 mod connection;

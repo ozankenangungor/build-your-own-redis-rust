@@ -23,7 +23,7 @@ pub async fn serve(
     let mut transaction = Transaction::default();
     // The same goes for the channels this client listens on: they are the
     // client's, not the server's, and go when it does.
-    let mut subscriptions = Subscriptions::default();
+    let mut subscriptions = Subscriptions::of(server.channels.clone());
 
     loop {
         if stream.read_buf(&mut buf).await? == 0 {

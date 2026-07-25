@@ -1,4 +1,5 @@
 use crate::aof::Aof;
+use crate::channels::Channels;
 use crate::config::Config;
 use crate::replicas::Replicas;
 use std::sync::OnceLock;
@@ -16,6 +17,9 @@ pub struct Server {
     /// The replicas following this server, each waiting to be told what has
     /// changed.
     pub replicas: Replicas,
+    /// Who is listening on what, so that a publisher can be told how far its
+    /// message reached.
+    pub channels: Channels,
     /// Where the writes are recorded as they happen, for a server keeping such
     /// a record. Empty is a server that keeps none.
     ///
@@ -57,6 +61,7 @@ impl Server {
                 offset: AtomicU64::new(0),
             },
             replicas: Replicas::default(),
+            channels: Channels::default(),
             aof: OnceLock::new(),
         }
     }

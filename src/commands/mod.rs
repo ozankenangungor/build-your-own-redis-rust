@@ -164,7 +164,7 @@ async fn run_against(
     }
     // Before the rest, since a client that is listening is answered differently
     // on a command another module would otherwise claim.
-    if let Some(reply) = pubsub::run(uppercased, args, subscriptions) {
+    if let Some(reply) = pubsub::run(uppercased, args, subscriptions, &server.channels) {
         return reply;
     }
     if let Some(reply) = strings::run(uppercased, args, store) {

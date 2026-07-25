@@ -182,6 +182,101 @@ fn answers_a_ping_the_old_way_until_the_client_starts_listening() {
 }
 
 #[test]
+fn tells_a_publisher_how_many_are_listening_on_the_channel() {
+    let server = Server::start();
+    let mut first = server.connect();
+    let mut second = server.connect();
+    let mut third = server.connect();
+    let mut publisher = server.connect();
+
+    first.send(&["SUBSCRIBE", "foo"]);
+    first.read_reply();
+    second.send(&["SUBSCRIBE", "bar"]);
+    second.read_reply();
+    third.send(&["SUBSCRIBE", "bar"]);
+    third.read_reply();
+
+    publisher.send(&["PUBLISH", "bar", "msg"]);
+    publisher.expect_reply(":2\r\n");
+    publisher.send(&["PUBLISH", "foo", "msg"]);
+    publisher.expect_reply(":1\r\n");
+}
+
+#[test]
+fn tells_a_publisher_of_nobody_on_a_channel_nobody_is_on() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["PUBLISH", "nobody", "msg"]);
+    client.expect_reply(":0\r\n");
+}
+
+#[test]
+fn counts_one_client_once_on_each_of_its_channels() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut publisher = server.connect();
+
+    // One client on several channels is one listener on each of them.
+    client.send(&["SUBSCRIBE", "foo", "bar"]);
+    client.read_reply();
+    client.read_reply();
+
+    publisher.send(&["PUBLISH", "foo", "msg"]);
+    publisher.expect_reply(":1\r\n");
+    publisher.send(&["PUBLISH", "bar", "msg"]);
+    publisher.expect_reply(":1\r\n");
+}
+
+#[test]
+fn stops_counting_a_client_that_has_hung_up() {
+    let server = Server::start();
+    let mut publisher = server.connect();
+
+    {
+        let mut leaving = server.connect();
+        leaving.send(&["SUBSCRIBE", "foo"]);
+        leaving.read_reply();
+
+        publisher.send(&["PUBLISH", "foo", "msg"]);
+        publisher.expect_reply(":1\r\n");
+    }
+
+    // A client that has gone is listening to nothing, and a publisher told
+    // otherwise would be told its message reached further than it did.
+    publisher.expect_reply_eventually(&["PUBLISH", "foo", "msg"], ":0\r\n");
+}
+
+#[test]
+fn will_not_publish_for_a_client_that_is_listening() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.read_reply();
+
+    // Redis leaves publishing out of what a listening client may do.
+    client.send(&["PUBLISH", "foo", "msg"]);
+    let said = client.read_line();
+
+    assert!(
+        said.starts_with("-ERR Can't execute 'publish': "),
+        "{said:?}"
+    );
+}
+
+#[test]
+fn refuses_a_publish_that_is_missing_a_channel_or_a_message() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for command in [["PUBLISH"].as_slice(), ["PUBLISH", "foo"].as_slice()] {
+        client.send(command);
+        client.expect_reply("-ERR wrong number of arguments for 'publish' command\r\n");
+    }
+}
+
+#[test]
 fn will_not_run_a_command_for_a_client_that_is_listening() {
     let server = Server::start();
     let mut client = server.connect();
