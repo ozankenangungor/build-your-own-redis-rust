@@ -203,6 +203,133 @@ fn tells_a_publisher_how_many_are_listening_on_the_channel() {
 }
 
 #[test]
+fn carries_a_message_to_everyone_listening_and_nobody_else() {
+    let server = Server::start();
+    let mut on_foo = server.connect();
+    let mut also_on_foo = server.connect();
+    let mut on_bar = server.connect();
+    let mut publisher = server.connect();
+
+    for client in [&mut on_foo, &mut also_on_foo] {
+        client.send(&["SUBSCRIBE", "foo"]);
+        client.read_reply();
+    }
+    on_bar.send(&["SUBSCRIBE", "bar"]);
+    on_bar.read_reply();
+
+    publisher.send(&["PUBLISH", "foo", "hello"]);
+    publisher.expect_reply(":2\r\n");
+
+    for client in [&mut on_foo, &mut also_on_foo] {
+        client.expect_reply("*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$5\r\nhello\r\n");
+    }
+
+    // The client on another channel hears the message meant for its own, and
+    // nothing of the one before it.
+    publisher.send(&["PUBLISH", "bar", "world"]);
+    publisher.expect_reply(":1\r\n");
+    on_bar.expect_reply("*3\r\n$7\r\nmessage\r\n$3\r\nbar\r\n$5\r\nworld\r\n");
+}
+
+#[test]
+fn carries_the_messages_in_the_order_they_were_published() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut publisher = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.read_reply();
+
+    for message in ["one", "two", "three"] {
+        publisher.send(&["PUBLISH", "foo", message]);
+        publisher.expect_reply(":1\r\n");
+    }
+
+    for message in ["one", "two", "three"] {
+        client.expect_reply(&format!(
+            "*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n${}\r\n{message}\r\n",
+            message.len()
+        ));
+    }
+}
+
+#[test]
+fn carries_a_message_on_each_of_the_channels_one_client_listens_on() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut publisher = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo", "bar"]);
+    client.read_reply();
+    client.read_reply();
+
+    publisher.send(&["PUBLISH", "foo", "one"]);
+    publisher.expect_reply(":1\r\n");
+    publisher.send(&["PUBLISH", "bar", "two"]);
+    publisher.expect_reply(":1\r\n");
+
+    client.expect_reply("*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$3\r\none\r\n");
+    client.expect_reply("*3\r\n$7\r\nmessage\r\n$3\r\nbar\r\n$3\r\ntwo\r\n");
+}
+
+#[test]
+fn carries_a_message_that_is_not_text() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut publisher = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.read_reply();
+
+    // A message is a run of bytes, as a value is, and may hold anything at all.
+    publisher.send_raw(b"*3\r\n$7\r\nPUBLISH\r\n$3\r\nfoo\r\n$3\r\n\r\n\x00\r\n");
+    publisher.expect_reply(":1\r\n");
+
+    client.expect_bytes(b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$3\r\n\r\n\x00\r\n");
+}
+
+#[test]
+fn carries_a_message_to_a_client_that_was_listening_before_it_was_sent() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut publisher = server.connect();
+
+    // Nothing published before a client was listening ever reaches it: a
+    // channel carries what is said while somebody is there to hear it.
+    publisher.send(&["PUBLISH", "foo", "before"]);
+    publisher.expect_reply(":0\r\n");
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.read_reply();
+
+    publisher.send(&["PUBLISH", "foo", "after"]);
+    publisher.expect_reply(":1\r\n");
+
+    client.expect_reply("*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$5\r\nafter\r\n");
+}
+
+#[test]
+fn goes_on_answering_a_listening_client_between_messages() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut publisher = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.read_reply();
+
+    publisher.send(&["PUBLISH", "foo", "hello"]);
+    publisher.expect_reply(":1\r\n");
+    client.expect_reply("*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$5\r\nhello\r\n");
+
+    // Waiting to be told something does not stop a client asking for what it
+    // may still ask for.
+    client.send(&["PING"]);
+    client.expect_reply("*2\r\n$4\r\npong\r\n$0\r\n\r\n");
+    client.send(&["SUBSCRIBE", "bar"]);
+    client.expect_reply("*3\r\n$9\r\nsubscribe\r\n$3\r\nbar\r\n:2\r\n");
+}
+
+#[test]
 fn tells_a_publisher_of_nobody_on_a_channel_nobody_is_on() {
     let server = Server::start();
     let mut client = server.connect();

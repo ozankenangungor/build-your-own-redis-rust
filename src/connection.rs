@@ -23,12 +23,25 @@ pub async fn serve(
     let mut transaction = Transaction::default();
     // The same goes for the channels this client listens on: they are the
     // client's, not the server's, and go when it does.
-    let mut subscriptions = Subscriptions::of(server.channels.clone());
+    let (mut subscriptions, mut messages) = Subscriptions::of(server.channels.clone());
 
     loop {
-        if stream.read_buf(&mut buf).await? == 0 {
-            eprintln!("{addr} closed the connection");
-            return Ok(());
+        // A client that is listening has two things to wait on at once: what it
+        // has to say, and what is said to it. Both are safe to wait on this way,
+        // so whichever comes first is taken up and the other goes on waiting.
+        tokio::select! {
+            // Published elsewhere, and handed on as it stands: it was laid out
+            // once, by whoever published it, for every listener alike.
+            Some(message) = messages.recv() => {
+                stream.write_all(&message).await?;
+                continue;
+            }
+            read = stream.read_buf(&mut buf) => {
+                if read? == 0 {
+                    eprintln!("{addr} closed the connection");
+                    return Ok(());
+                }
+            }
         }
 
         // A read may carry several commands at once, or only part of one.

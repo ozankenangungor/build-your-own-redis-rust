@@ -1,42 +1,71 @@
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
+use tokio::sync::mpsc;
+
+/// One client's end of the channels it listens on: what to hand a message to
+/// for it to reach that client.
+///
+/// A listener is written to rather than waited on, so that a client slow to
+/// read cannot hold up the one publishing. It is the listening client's own
+/// connection that takes the message off this and writes it out.
+pub type Listener = mpsc::UnboundedSender<Bytes>;
 
 /// Who is listening on what, across the whole server.
-///
-/// Only the tally is kept, one number to a channel. What a client is to be told
-/// is still the connection's own business; this is what a publisher asks to
-/// learn how far its message reached.
 #[derive(Clone, Default)]
-pub struct Channels(Arc<Mutex<HashMap<Bytes, usize>>>);
+pub struct Channels(Arc<Mutex<HashMap<Bytes, Vec<Listener>>>>);
 
 impl Channels {
-    /// Counts one more client as listening on this channel.
-    pub fn joined(&self, channel: &Bytes) {
-        *self.listeners().entry(channel.clone()).or_insert(0) += 1;
+    /// Takes on a client as listening on this channel.
+    pub fn joined(&self, channel: &Bytes, listener: &Listener) {
+        self.listeners()
+            .entry(channel.clone())
+            .or_default()
+            .push(listener.clone());
     }
 
-    /// Counts one fewer. A channel nobody is left on is forgotten rather than
-    /// kept at nothing, so that a server that has seen many channels come and
-    /// go is no heavier for it.
-    pub fn left(&self, channel: &Bytes) {
+    /// Lets a client go from a channel. A channel nobody is left on is forgotten
+    /// rather than kept empty, so that a server that has seen many channels come
+    /// and go is no heavier for it.
+    pub fn left(&self, channel: &Bytes, listener: &Listener) {
         let mut listeners = self.listeners();
 
-        if let Some(count) = listeners.get_mut(channel) {
-            *count -= 1;
+        let Some(on_channel) = listeners.get_mut(channel) else {
+            return;
+        };
 
-            if *count == 0 {
-                listeners.remove(channel);
-            }
+        // Told apart by which queue they lead to, since that is the one thing a
+        // listener is.
+        on_channel.retain(|other| !other.same_channel(listener));
+
+        if on_channel.is_empty() {
+            listeners.remove(channel);
         }
     }
 
-    /// How many clients are listening on this channel.
-    pub fn listening_to(&self, channel: &Bytes) -> usize {
-        self.listeners().get(channel).copied().unwrap_or(0)
+    /// Hands `delivery` to everyone listening on `channel`, and says how many
+    /// that was.
+    pub fn send(&self, channel: &Bytes, delivery: &Bytes) -> usize {
+        let mut listeners = self.listeners();
+
+        let Some(on_channel) = listeners.get_mut(channel) else {
+            return 0;
+        };
+
+        // A send that fails is one whose connection has just ended. Those are
+        // dropped here rather than counted, since a message reached them no
+        // more than it reached anybody who was never there.
+        on_channel.retain(|listener| listener.send(delivery.clone()).is_ok());
+
+        let reached = on_channel.len();
+        if reached == 0 {
+            listeners.remove(channel);
+        }
+
+        reached
     }
 
-    fn listeners(&self) -> MutexGuard<'_, HashMap<Bytes, usize>> {
+    fn listeners(&self) -> MutexGuard<'_, HashMap<Bytes, Vec<Listener>>> {
         // A panic elsewhere poisons the lock but leaves the tally intact, so
         // recover rather than taking down every other connection with it.
         self.0
@@ -53,65 +82,155 @@ mod tests {
         Bytes::copy_from_slice(name.as_bytes())
     }
 
-    #[test]
-    fn counts_nobody_on_a_channel_nobody_has_asked_for() {
-        assert_eq!(Channels::default().listening_to(&channel("foo")), 0);
+    fn message(text: &str) -> Bytes {
+        Bytes::copy_from_slice(text.as_bytes())
+    }
+
+    /// A client listening, along with the end its messages arrive on.
+    fn client() -> (Listener, mpsc::UnboundedReceiver<Bytes>) {
+        mpsc::unbounded_channel()
     }
 
     #[test]
-    fn counts_the_clients_as_they_arrive() {
+    fn reaches_nobody_on_a_channel_nobody_has_asked_for() {
         let channels = Channels::default();
 
-        channels.joined(&channel("foo"));
-        assert_eq!(channels.listening_to(&channel("foo")), 1);
-
-        channels.joined(&channel("foo"));
-        assert_eq!(channels.listening_to(&channel("foo")), 2);
+        assert_eq!(channels.send(&channel("foo"), &message("hello")), 0);
     }
 
     #[test]
-    fn counts_each_channel_apart_from_the_others() {
+    fn reaches_the_client_listening_on_the_channel() {
         let channels = Channels::default();
+        let (listener, mut heard) = client();
 
-        channels.joined(&channel("foo"));
-        channels.joined(&channel("bar"));
-        channels.joined(&channel("bar"));
+        channels.joined(&channel("foo"), &listener);
 
-        assert_eq!(channels.listening_to(&channel("foo")), 1);
-        assert_eq!(channels.listening_to(&channel("bar")), 2);
-        assert_eq!(channels.listening_to(&channel("baz")), 0);
+        assert_eq!(channels.send(&channel("foo"), &message("hello")), 1);
+        assert_eq!(heard.try_recv().unwrap(), message("hello"));
     }
 
     #[test]
-    fn counts_the_clients_as_they_go() {
+    fn reaches_every_client_listening_on_the_channel() {
         let channels = Channels::default();
+        let (mine, mut i_hear) = client();
+        let (yours, mut you_hear) = client();
 
-        channels.joined(&channel("foo"));
-        channels.joined(&channel("foo"));
-        channels.left(&channel("foo"));
+        channels.joined(&channel("foo"), &mine);
+        channels.joined(&channel("foo"), &yours);
 
-        assert_eq!(channels.listening_to(&channel("foo")), 1);
+        assert_eq!(channels.send(&channel("foo"), &message("hello")), 2);
+        assert_eq!(i_hear.try_recv().unwrap(), message("hello"));
+        assert_eq!(you_hear.try_recv().unwrap(), message("hello"));
+    }
 
-        channels.left(&channel("foo"));
-        assert_eq!(channels.listening_to(&channel("foo")), 0);
+    #[test]
+    fn reaches_only_the_channel_it_was_sent_to() {
+        let channels = Channels::default();
+        let (on_foo, mut foo_hears) = client();
+        let (on_bar, mut bar_hears) = client();
+
+        channels.joined(&channel("foo"), &on_foo);
+        channels.joined(&channel("bar"), &on_bar);
+
+        assert_eq!(channels.send(&channel("foo"), &message("hello")), 1);
+        assert_eq!(foo_hears.try_recv().unwrap(), message("hello"));
+        assert!(bar_hears.try_recv().is_err());
+    }
+
+    #[test]
+    fn reaches_one_client_on_each_of_the_channels_it_listens_on() {
+        let channels = Channels::default();
+        let (listener, mut heard) = client();
+
+        channels.joined(&channel("foo"), &listener);
+        channels.joined(&channel("bar"), &listener);
+
+        assert_eq!(channels.send(&channel("foo"), &message("one")), 1);
+        assert_eq!(channels.send(&channel("bar"), &message("two")), 1);
+
+        assert_eq!(heard.try_recv().unwrap(), message("one"));
+        assert_eq!(heard.try_recv().unwrap(), message("two"));
+    }
+
+    #[test]
+    fn keeps_the_messages_in_the_order_they_were_sent() {
+        let channels = Channels::default();
+        let (listener, mut heard) = client();
+
+        channels.joined(&channel("foo"), &listener);
+
+        for text in ["one", "two", "three"] {
+            channels.send(&channel("foo"), &message(text));
+        }
+
+        for text in ["one", "two", "three"] {
+            assert_eq!(heard.try_recv().unwrap(), message(text));
+        }
+    }
+
+    #[test]
+    fn stops_reaching_a_client_that_has_left_the_channel() {
+        let channels = Channels::default();
+        let (staying, _stays) = client();
+        let (leaving, mut left) = client();
+
+        channels.joined(&channel("foo"), &staying);
+        channels.joined(&channel("foo"), &leaving);
+        channels.left(&channel("foo"), &leaving);
+
+        assert_eq!(channels.send(&channel("foo"), &message("hello")), 1);
+        assert!(left.try_recv().is_err());
+    }
+
+    #[test]
+    fn lets_one_client_go_and_leaves_the_others_where_they_were() {
+        let channels = Channels::default();
+        let (mine, _i_hear) = client();
+        let (yours, _you_hear) = client();
+
+        channels.joined(&channel("foo"), &mine);
+        channels.joined(&channel("foo"), &yours);
+        channels.left(&channel("foo"), &mine);
+        channels.left(&channel("foo"), &mine);
+
+        // Letting go of a client twice lets go of it once: the second time
+        // there is nothing of it left to find.
+        assert_eq!(channels.send(&channel("foo"), &message("hello")), 1);
     }
 
     #[test]
     fn thinks_nothing_of_a_client_leaving_a_channel_it_was_never_on() {
         let channels = Channels::default();
+        let (listener, _heard) = client();
 
-        channels.left(&channel("foo"));
+        channels.left(&channel("foo"), &listener);
 
-        assert_eq!(channels.listening_to(&channel("foo")), 0);
+        assert_eq!(channels.send(&channel("foo"), &message("hello")), 0);
     }
 
     #[test]
-    fn is_one_tally_however_many_hands_hold_it() {
+    fn stops_reaching_a_client_that_has_gone() {
+        let channels = Channels::default();
+        let (staying, _stays) = client();
+        let (leaving, gone) = client();
+
+        channels.joined(&channel("foo"), &staying);
+        channels.joined(&channel("foo"), &leaving);
+        drop(gone);
+
+        // A client whose connection has ended is reached no further than one
+        // who was never listening.
+        assert_eq!(channels.send(&channel("foo"), &message("hello")), 1);
+    }
+
+    #[test]
+    fn is_one_listing_however_many_hands_hold_it() {
         let channels = Channels::default();
         let shared = channels.clone();
+        let (listener, _heard) = client();
 
-        shared.joined(&channel("foo"));
+        shared.joined(&channel("foo"), &listener);
 
-        assert_eq!(channels.listening_to(&channel("foo")), 1);
+        assert_eq!(channels.send(&channel("foo"), &message("hello")), 1);
     }
 }

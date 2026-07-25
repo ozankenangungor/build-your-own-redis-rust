@@ -1,7 +1,8 @@
 use super::wrong_arity;
-use crate::channels::Channels;
+use crate::channels::{Channels, Listener};
 use crate::resp::Value;
 use bytes::Bytes;
+use tokio::sync::mpsc;
 
 /// The commands a client may still use once it is listening on a channel.
 ///
@@ -24,19 +25,27 @@ const ALLOWED_WHILE_LISTENING: &[&str] = &[
 /// something a client does, and it lasts exactly as long as the client does.
 /// The server's own tally is kept up to date from here, arriving and leaving
 /// alike, so that what a publisher is told is what is really there.
-#[derive(Default)]
 pub struct Subscriptions {
     on: Vec<Bytes>,
     channels: Channels,
+    /// This client's end of every channel it listens on. What arrives here is
+    /// the connection's to write out.
+    listener: Listener,
 }
 
 impl Subscriptions {
-    /// The channels of a client on this server.
-    pub fn of(channels: Channels) -> Self {
-        Self {
+    /// The channels of a client on this server, along with the end of the line
+    /// the messages for it will arrive on.
+    pub fn of(channels: Channels) -> (Self, mpsc::UnboundedReceiver<Bytes>) {
+        let (listener, messages) = mpsc::unbounded_channel();
+
+        let subscriptions = Self {
             on: Vec::new(),
             channels,
-        }
+            listener,
+        };
+
+        (subscriptions, messages)
     }
 
     /// Whether this client is listening on anything at all.
@@ -55,10 +64,19 @@ impl Subscriptions {
     fn add(&mut self, channel: &Bytes) -> usize {
         if !self.on.contains(channel) {
             self.on.push(channel.clone());
-            self.channels.joined(channel);
+            self.channels.joined(channel, &self.listener);
         }
 
         self.on.len()
+    }
+}
+
+impl Default for Subscriptions {
+    /// A client that is not on this server at all: a command played back out of
+    /// a record, or one a master sent along. Nothing there ever subscribes, and
+    /// nobody is waiting to be told if it did.
+    fn default() -> Self {
+        Self::of(Channels::default()).0
     }
 }
 
@@ -67,7 +85,7 @@ impl Drop for Subscriptions {
         // A client that has gone is listening to nothing, whether it said so or
         // simply hung up.
         for channel in &self.on {
-            self.channels.left(channel);
+            self.channels.left(channel, &self.listener);
         }
     }
 }
@@ -82,10 +100,13 @@ pub fn run(
     channels: &Channels,
 ) -> Option<Value> {
     let reply = match command {
-        // How far the message reached, counted as it goes out. Carrying it to
-        // those listening is the connection's own work, and still to come.
+        // The message goes out to everyone on the channel, and the publisher is
+        // told how far it reached. Writing it to each of them is the work of
+        // the connection carrying that client.
         "PUBLISH" => match args {
-            [channel, _message] => Value::Integer(channels.listening_to(channel) as i64),
+            [channel, message] => {
+                Value::Integer(channels.send(channel, &delivery(channel, message)) as i64)
+            }
             _ => wrong_arity("publish"),
         },
         // Each channel is confirmed on its own, in the order it was named, and
@@ -128,6 +149,22 @@ pub fn out_of_context(command: &str) -> Value {
         "ERR Can't execute '{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
         command.to_lowercase()
     ))
+}
+
+/// A message as a listening client is to hear it: what arrived, the channel it
+/// arrived on, and what was said.
+///
+/// It is laid out once here and handed to each listener as it stands. What one
+/// client is told is what every other on the channel is told.
+fn delivery(channel: &Bytes, message: &Bytes) -> Bytes {
+    Bytes::from(
+        Value::Array(vec![
+            Value::BulkString(Bytes::from_static(b"message")),
+            Value::BulkString(channel.clone()),
+            Value::BulkString(message.clone()),
+        ])
+        .encode(),
+    )
 }
 
 /// What a client is told when it has been put on a channel: what happened, the
@@ -232,10 +269,55 @@ mod tests {
     }
 
     #[test]
+    fn lays_a_message_out_the_way_a_listening_client_hears_it() {
+        assert_eq!(
+            delivery(&named("foo"), &named("hello")),
+            &b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$5\r\nhello\r\n"[..]
+        );
+    }
+
+    #[test]
+    fn lays_out_a_message_that_is_not_text() {
+        // A message is a run of bytes and may hold anything at all, newlines
+        // and nothing included.
+        let message = Bytes::from_static(b"\r\n\x00");
+
+        assert_eq!(
+            delivery(&named("foo"), &message),
+            &b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$3\r\n\r\n\x00\r\n"[..]
+        );
+    }
+
+    #[test]
+    fn carries_the_message_to_the_client_listening_for_it() {
+        let channels = Channels::default();
+        let (mut client, mut heard) = Subscriptions::of(channels.clone());
+
+        subscribe(&["foo"], &mut client);
+        publish("foo", &channels);
+
+        assert_eq!(
+            heard.try_recv().unwrap(),
+            &b"*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$5\r\nhello\r\n"[..]
+        );
+    }
+
+    #[test]
+    fn carries_nothing_to_a_client_listening_elsewhere() {
+        let channels = Channels::default();
+        let (mut client, mut heard) = Subscriptions::of(channels.clone());
+
+        subscribe(&["bar"], &mut client);
+        publish("foo", &channels);
+
+        assert!(heard.try_recv().is_err());
+    }
+
+    #[test]
     fn tells_a_publisher_how_many_are_listening() {
         let channels = Channels::default();
-        let mut mine = Subscriptions::of(channels.clone());
-        let mut yours = Subscriptions::of(channels.clone());
+        let (mut mine, _i_hear) = Subscriptions::of(channels.clone());
+        let (mut yours, _you_hear) = Subscriptions::of(channels.clone());
 
         assert_eq!(publish("foo", &channels), Value::Integer(0));
 
@@ -249,7 +331,7 @@ mod tests {
     #[test]
     fn counts_only_those_listening_on_the_channel_published_to() {
         let channels = Channels::default();
-        let mut client = Subscriptions::of(channels.clone());
+        let (mut client, _heard) = Subscriptions::of(channels.clone());
 
         subscribe(&["foo", "bar"], &mut client);
 
@@ -261,7 +343,7 @@ mod tests {
     #[test]
     fn counts_a_client_on_a_channel_once_however_often_it_asked() {
         let channels = Channels::default();
-        let mut client = Subscriptions::of(channels.clone());
+        let (mut client, _heard) = Subscriptions::of(channels.clone());
 
         subscribe(&["foo"], &mut client);
         subscribe(&["foo"], &mut client);
@@ -272,11 +354,11 @@ mod tests {
     #[test]
     fn stops_counting_a_client_that_has_gone() {
         let channels = Channels::default();
-        let mut staying = Subscriptions::of(channels.clone());
+        let (mut staying, _stays) = Subscriptions::of(channels.clone());
 
         subscribe(&["foo"], &mut staying);
         {
-            let mut leaving = Subscriptions::of(channels.clone());
+            let (mut leaving, _left) = Subscriptions::of(channels.clone());
             subscribe(&["foo"], &mut leaving);
 
             assert_eq!(publish("foo", &channels), Value::Integer(2));
