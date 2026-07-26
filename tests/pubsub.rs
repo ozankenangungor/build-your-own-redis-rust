@@ -232,6 +232,105 @@ fn carries_a_message_to_everyone_listening_and_nobody_else() {
 }
 
 #[test]
+fn stops_carrying_to_a_client_once_it_has_given_the_channel_up() {
+    let server = Server::start();
+    let mut first = server.connect();
+    let mut second = server.connect();
+    let mut publisher = server.connect();
+
+    // The shape the tester lays out: two clients overlapping on one channel.
+    first.send(&["SUBSCRIBE", "foo"]);
+    first.read_reply();
+    first.send(&["SUBSCRIBE", "baz"]);
+    first.read_reply();
+    second.send(&["SUBSCRIBE", "foo"]);
+    second.read_reply();
+    second.send(&["SUBSCRIBE", "bar"]);
+    second.read_reply();
+
+    publisher.send(&["PUBLISH", "foo", "before-unsubscribe"]);
+    publisher.expect_reply(":2\r\n");
+    for client in [&mut first, &mut second] {
+        client.expect_reply("*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$18\r\nbefore-unsubscribe\r\n");
+    }
+
+    // One channel given up out of two, so the count left is the other.
+    first.send(&["UNSUBSCRIBE", "foo"]);
+    first.expect_reply("*3\r\n$11\r\nunsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+
+    publisher.send(&["PUBLISH", "foo", "after-unsubscribe"]);
+    publisher.expect_reply(":1\r\n");
+    second.expect_reply("*3\r\n$7\r\nmessage\r\n$3\r\nfoo\r\n$17\r\nafter-unsubscribe\r\n");
+
+    // What the client kept still reaches it; what it gave up does not.
+    publisher.send(&["PUBLISH", "baz", "kept"]);
+    publisher.expect_reply(":1\r\n");
+    first.expect_reply("*3\r\n$7\r\nmessage\r\n$3\r\nbaz\r\n$4\r\nkept\r\n");
+}
+
+#[test]
+fn confirms_a_channel_it_was_never_on_and_leaves_the_count_alone() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.expect_reply("*3\r\n$9\r\nsubscribe\r\n$3\r\nfoo\r\n:1\r\n");
+
+    client.send(&["UNSUBSCRIBE", "bar"]);
+    client.expect_reply("*3\r\n$11\r\nunsubscribe\r\n$3\r\nbar\r\n:1\r\n");
+}
+
+#[test]
+fn lets_a_client_ask_for_anything_again_once_it_has_stopped_listening() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo"]);
+    client.read_reply();
+    client.send(&["UNSUBSCRIBE", "foo"]);
+    client.expect_reply("*3\r\n$11\r\nunsubscribe\r\n$3\r\nfoo\r\n:0\r\n");
+
+    // Listening to nothing, the client is a client like any other again.
+    client.send(&["SET", "key", "value"]);
+    client.expect_reply("+OK\r\n");
+    client.send(&["GET", "key"]);
+    client.expect_reply("$5\r\nvalue\r\n");
+    client.send(&["PING"]);
+    client.expect_reply("+PONG\r\n");
+}
+
+#[test]
+fn gives_up_every_channel_when_it_names_none() {
+    let server = Server::start();
+    let mut client = server.connect();
+    let mut publisher = server.connect();
+
+    client.send(&["SUBSCRIBE", "foo", "bar"]);
+    client.read_reply();
+    client.read_reply();
+
+    client.send(&["UNSUBSCRIBE"]);
+    client.expect_reply(
+        "*3\r\n$11\r\nunsubscribe\r\n$3\r\nfoo\r\n:1\r\n\
+         *3\r\n$11\r\nunsubscribe\r\n$3\r\nbar\r\n:0\r\n",
+    );
+
+    publisher.send(&["PUBLISH", "foo", "hello"]);
+    publisher.expect_reply(":0\r\n");
+    publisher.send(&["PUBLISH", "bar", "hello"]);
+    publisher.expect_reply(":0\r\n");
+}
+
+#[test]
+fn says_so_once_when_it_names_no_channel_and_is_on_none() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["UNSUBSCRIBE"]);
+    client.expect_reply("*3\r\n$11\r\nunsubscribe\r\n$-1\r\n:0\r\n");
+}
+
+#[test]
 fn carries_the_messages_in_the_order_they_were_published() {
     let server = Server::start();
     let mut client = server.connect();

@@ -69,6 +69,19 @@ impl Subscriptions {
 
         self.on.len()
     }
+
+    /// Gives up a channel and says how many this client is left listening on.
+    ///
+    /// Giving up one it was never on leaves it where it was, and is answered
+    /// just the same: what the client asked for is so either way.
+    fn remove(&mut self, channel: &Bytes) -> usize {
+        if let Some(at) = self.on.iter().position(|on| on == channel) {
+            self.on.remove(at);
+            self.channels.left(channel, &self.listener);
+        }
+
+        self.on.len()
+    }
 }
 
 impl Default for Subscriptions {
@@ -116,7 +129,27 @@ pub fn run(
             channels => Value::Sequence(
                 channels
                     .iter()
-                    .map(|channel| listening(channel, subscriptions.add(channel)))
+                    .map(|channel| {
+                        confirm("subscribe", channel.clone(), subscriptions.add(channel))
+                    })
+                    .collect(),
+            ),
+        },
+        // The same going the other way, and the count falls as they are given
+        // up. Naming none gives up the lot, since a client that says only that
+        // it is done listening has said all it needs to.
+        "UNSUBSCRIBE" => match args {
+            [] => given_up(subscriptions),
+            channels => Value::Sequence(
+                channels
+                    .iter()
+                    .map(|channel| {
+                        confirm(
+                            "unsubscribe",
+                            channel.clone(),
+                            subscriptions.remove(channel),
+                        )
+                    })
                     .collect(),
             ),
         },
@@ -167,12 +200,41 @@ fn delivery(channel: &Bytes, message: &Bytes) -> Bytes {
     )
 }
 
-/// What a client is told when it has been put on a channel: what happened, the
-/// channel it happened to, and how many it is listening on all told.
-fn listening(channel: &Bytes, count: usize) -> Value {
+/// Gives up every channel a client is listening on, confirming each in turn.
+///
+/// A client listening on nothing is told so once, naming no channel at all:
+/// there is none to name, and saying nothing would leave it waiting.
+fn given_up(subscriptions: &mut Subscriptions) -> Value {
+    let on = subscriptions.on.clone();
+
+    if on.is_empty() {
+        return confirm_naming("unsubscribe", Value::Null, 0);
+    }
+
+    Value::Sequence(
+        on.iter()
+            .map(|channel| {
+                confirm(
+                    "unsubscribe",
+                    channel.clone(),
+                    subscriptions.remove(channel),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// What a client is told when it has been put on a channel or taken off one:
+/// what happened, the channel it happened to, and how many it is listening on
+/// once it has.
+fn confirm(what: &'static str, channel: Bytes, count: usize) -> Value {
+    confirm_naming(what, Value::BulkString(channel), count)
+}
+
+fn confirm_naming(what: &'static str, channel: Value, count: usize) -> Value {
     Value::Array(vec![
-        Value::BulkString(Bytes::from_static(b"subscribe")),
-        Value::BulkString(channel.clone()),
+        Value::BulkString(Bytes::from_static(what.as_bytes())),
+        channel,
         Value::Integer(count as i64),
     ])
 }
@@ -266,6 +328,131 @@ mod tests {
         let args = [named(channel), named("hello")];
 
         run("PUBLISH", &args, &mut nobody, channels).expect("publish belongs to this module")
+    }
+
+    fn unsubscribe(channels: &[&str], subscriptions: &mut Subscriptions) -> Value {
+        let named: Vec<Bytes> = channels.iter().copied().map(named).collect();
+        let listening = subscriptions.channels.clone();
+
+        run("UNSUBSCRIBE", &named, subscriptions, &listening)
+            .expect("unsubscribe belongs to this module")
+    }
+
+    #[test]
+    fn confirms_the_channel_it_gives_up() {
+        let mut subscriptions = Subscriptions::default();
+        subscribe(&["foo"], &mut subscriptions);
+
+        assert_eq!(
+            unsubscribe(&["foo"], &mut subscriptions).encode(),
+            b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nfoo\r\n:0\r\n"
+        );
+    }
+
+    #[test]
+    fn counts_the_channels_left_as_they_are_given_up() {
+        let mut subscriptions = Subscriptions::default();
+        subscribe(&["foo", "bar"], &mut subscriptions);
+
+        assert_eq!(
+            unsubscribe(&["foo"], &mut subscriptions).encode(),
+            b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nfoo\r\n:1\r\n"
+        );
+        assert_eq!(
+            unsubscribe(&["bar"], &mut subscriptions).encode(),
+            b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nbar\r\n:0\r\n"
+        );
+    }
+
+    #[test]
+    fn confirms_a_channel_it_was_never_on_and_leaves_the_count_alone() {
+        let mut subscriptions = Subscriptions::default();
+        subscribe(&["foo"], &mut subscriptions);
+
+        assert_eq!(
+            unsubscribe(&["bar"], &mut subscriptions).encode(),
+            b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nbar\r\n:1\r\n"
+        );
+    }
+
+    #[test]
+    fn confirms_each_of_the_channels_it_gives_up_in_turn() {
+        let mut subscriptions = Subscriptions::default();
+        subscribe(&["foo", "bar"], &mut subscriptions);
+
+        assert_eq!(
+            unsubscribe(&["foo", "bar"], &mut subscriptions).encode(),
+            b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nfoo\r\n:1\r\n\
+              *3\r\n$11\r\nunsubscribe\r\n$3\r\nbar\r\n:0\r\n"
+        );
+    }
+
+    #[test]
+    fn gives_up_every_channel_when_it_names_none() {
+        let mut subscriptions = Subscriptions::default();
+        subscribe(&["foo", "bar"], &mut subscriptions);
+
+        assert_eq!(
+            unsubscribe(&[], &mut subscriptions).encode(),
+            b"*3\r\n$11\r\nunsubscribe\r\n$3\r\nfoo\r\n:1\r\n\
+              *3\r\n$11\r\nunsubscribe\r\n$3\r\nbar\r\n:0\r\n"
+        );
+        assert!(!subscriptions.listening());
+    }
+
+    #[test]
+    fn says_so_once_when_it_names_none_and_is_on_none() {
+        let mut subscriptions = Subscriptions::default();
+
+        // There is no channel to name, and saying nothing at all would leave
+        // the client waiting on an answer that never came.
+        assert_eq!(
+            unsubscribe(&[], &mut subscriptions).encode(),
+            b"*3\r\n$11\r\nunsubscribe\r\n$-1\r\n:0\r\n"
+        );
+    }
+
+    #[test]
+    fn stops_listening_once_it_has_given_up_its_last_channel() {
+        let mut subscriptions = Subscriptions::default();
+
+        subscribe(&["foo", "bar"], &mut subscriptions);
+        assert!(subscriptions.listening());
+
+        unsubscribe(&["foo"], &mut subscriptions);
+        assert!(subscriptions.listening());
+
+        unsubscribe(&["bar"], &mut subscriptions);
+        assert!(!subscriptions.listening());
+    }
+
+    #[test]
+    fn carries_nothing_to_a_client_that_has_given_the_channel_up() {
+        let channels = Channels::default();
+        let (mut client, mut heard) = Subscriptions::of(channels.clone());
+
+        subscribe(&["foo"], &mut client);
+        unsubscribe(&["foo"], &mut client);
+
+        assert_eq!(publish("foo", &channels), Value::Integer(0));
+        assert!(heard.try_recv().is_err());
+    }
+
+    #[test]
+    fn goes_on_carrying_to_a_client_on_the_channels_it_kept() {
+        let channels = Channels::default();
+        let (mut client, mut heard) = Subscriptions::of(channels.clone());
+
+        subscribe(&["foo", "bar"], &mut client);
+        unsubscribe(&["foo"], &mut client);
+
+        assert_eq!(publish("foo", &channels), Value::Integer(0));
+        assert_eq!(publish("bar", &channels), Value::Integer(1));
+
+        assert_eq!(
+            heard.try_recv().unwrap(),
+            &b"*3\r\n$7\r\nmessage\r\n$3\r\nbar\r\n$5\r\nhello\r\n"[..]
+        );
     }
 
     #[test]
