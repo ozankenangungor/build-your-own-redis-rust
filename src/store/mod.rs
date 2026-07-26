@@ -1,4 +1,5 @@
 mod lists;
+mod sorted_sets;
 mod streams;
 mod strings;
 
@@ -20,6 +21,7 @@ use tokio::sync::{Notify, oneshot};
 pub struct Store(Arc<Mutex<State>>);
 
 /// Returned when a command is used on a key holding another type of value.
+#[derive(Debug, PartialEq)]
 pub struct WrongType;
 
 /// The kind of value a key holds, or `None` when there is no such key.
@@ -29,6 +31,7 @@ pub enum Kind {
     String,
     List,
     Stream,
+    SortedSet,
 }
 
 #[derive(Default)]
@@ -68,6 +71,10 @@ impl Store {
                 data: Data::Stream(_),
                 ..
             }) => Kind::Stream,
+            Some(Entry {
+                data: Data::SortedSet(_),
+                ..
+            }) => Kind::SortedSet,
         }
     }
 
@@ -162,6 +169,9 @@ enum Data {
     /// is for: a `Vec` would shift every element on each `LPUSH` and `LPOP`.
     List(VecDeque<Bytes>),
     Stream(Vec<streams::StreamEntry>),
+    /// Members held in the order of their scores, so that the ones asked for
+    /// most — by where they fall — are found without a search.
+    SortedSet(sorted_sets::SortedSet),
 }
 
 impl Entry {

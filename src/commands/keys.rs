@@ -41,5 +41,6 @@ fn type_name(kind: Kind) -> &'static str {
         Kind::String => "string",
         Kind::List => "list",
         Kind::Stream => "stream",
+        Kind::SortedSet => "zset",
     }
 }

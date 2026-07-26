@@ -4,6 +4,7 @@ mod lists;
 mod pubsub;
 mod replication;
 mod settings;
+mod sorted_sets;
 mod streams;
 mod strings;
 mod transactions;
@@ -176,6 +177,9 @@ async fn run_against(
     if let Some(reply) = streams::run(uppercased, args, store).await {
         return reply;
     }
+    if let Some(reply) = sorted_sets::run(uppercased, args, store) {
+        return reply;
+    }
     if let Some(reply) = keys::run(uppercased, args, store) {
         return reply;
     }
@@ -201,7 +205,7 @@ async fn run_against(
 fn changes_the_store(command: &str) -> bool {
     matches!(
         command,
-        "SET" | "INCR" | "RPUSH" | "LPUSH" | "LPOP" | "XADD"
+        "SET" | "INCR" | "RPUSH" | "LPUSH" | "LPOP" | "XADD" | "ZADD"
     )
 }
 

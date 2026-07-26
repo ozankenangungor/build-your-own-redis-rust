@@ -1,0 +1,241 @@
+use super::{Data, Entry, Store, WrongType, drop_if_expired};
+use bytes::Bytes;
+use std::cmp::Ordering;
+
+/// One member of a sorted set: what it is called, and where in the order it
+/// falls.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Member {
+    pub score: f64,
+    pub name: Bytes,
+}
+
+/// The members of a sorted set, kept in the order Redis keeps them.
+///
+/// A `Vec` held in order rather than a skip list. Finding a member by where it
+/// falls, or reading off a run of them, is what a sorted set is asked for most,
+/// and both are as quick here as anywhere. Adding one costs a shift of what
+/// comes after it, which for the sets this server holds is no great matter.
+#[derive(Default)]
+pub struct SortedSet(Vec<Member>);
+
+impl SortedSet {
+    /// Puts a member in its place, and says whether it is one this set had
+    /// never held. A member that was already here is moved rather than added,
+    /// since a name appears in a sorted set once and once only.
+    fn add(&mut self, score: f64, name: &Bytes) -> bool {
+        let known = self.take(name);
+
+        let member = Member {
+            score,
+            name: name.clone(),
+        };
+        let at = self.0.partition_point(|other| precedes(other, &member));
+        self.0.insert(at, member);
+
+        !known
+    }
+
+    /// Lifts a member out by name, if it is here at all, and says whether it
+    /// was. Scores are no help in the finding: it is the new score that is
+    /// being put in place of the old.
+    fn take(&mut self, name: &Bytes) -> bool {
+        match self.0.iter().position(|member| member.name == name) {
+            Some(at) => {
+                self.0.remove(at);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Whether one member comes before another: by score, and by name where the
+/// scores are equal.
+///
+/// Two scores always compare one way or the other here, since a member is never
+/// admitted with a score that is not a number.
+fn precedes(member: &Member, other: &Member) -> bool {
+    match member.score.partial_cmp(&other.score) {
+        Some(Ordering::Less) => true,
+        Some(Ordering::Equal) => member.name < other.name,
+        _ => false,
+    }
+}
+
+impl Store {
+    /// Puts these members into the sorted set at `key`, making one if there is
+    /// none, and says how many of them the set had never held.
+    pub fn zadd(&self, key: &Bytes, members: &[(f64, Bytes)]) -> Result<usize, WrongType> {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        let version = state.next_version();
+        let entry = state
+            .entries
+            .entry(key.clone())
+            .or_insert_with(|| Entry::new(Data::SortedSet(SortedSet::default()), version));
+
+        let Data::SortedSet(set) = &mut entry.data else {
+            return Err(WrongType);
+        };
+
+        let mut added = 0;
+        for (score, name) in members {
+            if set.add(*score, name) {
+                added += 1;
+            }
+        }
+
+        entry.version = version;
+
+        Ok(added)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn named(name: &str) -> Bytes {
+        Bytes::copy_from_slice(name.as_bytes())
+    }
+
+    /// The set's members in the order it holds them.
+    fn in_order(set: &SortedSet) -> Vec<(f64, &str)> {
+        set.0
+            .iter()
+            .map(|member| {
+                (
+                    member.score,
+                    str::from_utf8(&member.name).expect("a name a test gave it"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn holds_the_one_member_it_is_given() {
+        let mut set = SortedSet::default();
+
+        assert!(set.add(8.0, &named("Sam")));
+        assert_eq!(in_order(&set), [(8.0, "Sam")]);
+    }
+
+    #[test]
+    fn holds_its_members_in_the_order_of_their_scores() {
+        let mut set = SortedSet::default();
+
+        for (score, name) in [(14.5, "Prickett"), (6.1, "Ford"), (8.2, "Royce")] {
+            assert!(set.add(score, &named(name)));
+        }
+
+        assert_eq!(
+            in_order(&set),
+            [(6.1, "Ford"), (8.2, "Royce"), (14.5, "Prickett")]
+        );
+    }
+
+    #[test]
+    fn settles_a_tie_on_score_by_the_name() {
+        let mut set = SortedSet::default();
+
+        for name in ["Sam-Bodden", "Royce", "Castilla"] {
+            set.add(8.2, &named(name));
+        }
+
+        assert_eq!(
+            in_order(&set),
+            [(8.2, "Castilla"), (8.2, "Royce"), (8.2, "Sam-Bodden")]
+        );
+    }
+
+    #[test]
+    fn holds_a_name_once_however_often_it_is_added() {
+        let mut set = SortedSet::default();
+
+        assert!(set.add(1.0, &named("Sam")));
+        assert!(!set.add(1.0, &named("Sam")));
+        assert_eq!(in_order(&set), [(1.0, "Sam")]);
+    }
+
+    #[test]
+    fn moves_a_member_whose_score_has_changed() {
+        let mut set = SortedSet::default();
+
+        set.add(1.0, &named("first"));
+        set.add(2.0, &named("second"));
+        set.add(3.0, &named("third"));
+
+        assert!(!set.add(9.0, &named("first")));
+        assert_eq!(
+            in_order(&set),
+            [(2.0, "second"), (3.0, "third"), (9.0, "first")]
+        );
+    }
+
+    #[test]
+    fn holds_the_members_whose_scores_are_beyond_counting() {
+        let mut set = SortedSet::default();
+
+        set.add(0.0, &named("nought"));
+        set.add(f64::INFINITY, &named("most"));
+        set.add(f64::NEG_INFINITY, &named("least"));
+
+        assert_eq!(
+            in_order(&set),
+            [
+                (f64::NEG_INFINITY, "least"),
+                (0.0, "nought"),
+                (f64::INFINITY, "most"),
+            ]
+        );
+    }
+
+    #[test]
+    fn makes_a_set_for_a_key_that_had_none() {
+        let store = Store::default();
+
+        assert_eq!(store.zadd(&named("racers"), &[(8.0, named("Sam"))]), Ok(1));
+    }
+
+    #[test]
+    fn adds_to_the_set_a_key_already_holds() {
+        let store = Store::default();
+        let key = named("racers");
+
+        store.zadd(&key, &[(8.0, named("Sam"))]).unwrap();
+
+        assert_eq!(store.zadd(&key, &[(6.1, named("Ford"))]), Ok(1));
+    }
+
+    #[test]
+    fn counts_only_the_members_the_set_had_never_held() {
+        let store = Store::default();
+        let key = named("racers");
+
+        store.zadd(&key, &[(8.0, named("Sam"))]).unwrap();
+
+        // One already here at another score, one never seen before.
+        let members = [(9.0, named("Sam")), (6.1, named("Ford"))];
+        assert_eq!(store.zadd(&key, &members), Ok(1));
+    }
+
+    #[test]
+    fn counts_the_members_added_in_one_go() {
+        let store = Store::default();
+        let members = [(1.0, named("a")), (2.0, named("b")), (3.0, named("c"))];
+
+        assert_eq!(store.zadd(&named("racers"), &members), Ok(3));
+    }
+
+    #[test]
+    fn will_not_add_to_a_key_holding_something_else() {
+        let store = Store::default();
+        let key = named("racers");
+
+        store.set(key.clone(), named("a string"), None);
+
+        assert_eq!(store.zadd(&key, &[(8.0, named("Sam"))]), Err(WrongType));
+    }
+}
