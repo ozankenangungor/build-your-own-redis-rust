@@ -36,6 +36,39 @@ fn counts_nothing_for_a_member_the_set_already_held() {
 }
 
 #[test]
+fn counts_the_members_as_they_are_added_one_after_another() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    // A member added is one the set had never held; a member updated is not,
+    // however far its score moves.
+    for (score, member, added) in [
+        ("20.0", "zset_member1", ":1\r\n"),
+        ("30.1", "zset_member2", ":1\r\n"),
+        ("40.2", "zset_member3", ":1\r\n"),
+        ("50.3", "zset_member4", ":1\r\n"),
+        ("100.0", "zset_member1", ":0\r\n"),
+        ("0.0043", "zset_member5", ":1\r\n"),
+    ] {
+        client.send(&["ZADD", "zset_key", score, member]);
+        client.expect_reply(added);
+    }
+}
+
+#[test]
+fn keeps_the_sets_at_two_keys_apart() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZADD", "racers", "8.0", "Sam"]);
+    client.expect_reply(":1\r\n");
+
+    // The same name under another key is a member that key had never held.
+    client.send(&["ZADD", "riders", "8.0", "Sam"]);
+    client.expect_reply(":1\r\n");
+}
+
+#[test]
 fn counts_each_of_the_members_named_in_one_go() {
     let server = Server::start();
     let mut client = server.connect();
