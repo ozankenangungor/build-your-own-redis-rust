@@ -142,6 +142,85 @@ fn refuses_to_add_to_a_key_holding_something_else() {
 }
 
 #[test]
+fn says_where_each_member_falls_in_the_order() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for (score, member) in [
+        ("100.0", "foo"),
+        ("100.0", "bar"),
+        ("20.0", "baz"),
+        ("30.1", "caz"),
+        ("40.2", "paz"),
+    ] {
+        client.send(&["ZADD", "zset_key", score, member]);
+        client.expect_reply(":1\r\n");
+    }
+
+    // By score, and by name where the scores are equal: `bar` comes before
+    // `foo` at a hundred apiece.
+    for (member, rank) in [("baz", 0), ("caz", 1), ("paz", 2), ("bar", 3), ("foo", 4)] {
+        client.send(&["ZRANK", "zset_key", member]);
+        client.expect_reply(&format!(":{rank}\r\n"));
+    }
+}
+
+#[test]
+fn says_nothing_of_a_member_or_a_set_that_is_not_there() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZADD", "zset_key", "1.0", "member"]);
+    client.expect_reply(":1\r\n");
+
+    client.send(&["ZRANK", "zset_key", "missing_member"]);
+    client.expect_reply("$-1\r\n");
+    client.send(&["ZRANK", "missing_key", "member"]);
+    client.expect_reply("$-1\r\n");
+}
+
+#[test]
+fn says_where_a_member_falls_once_its_score_has_moved() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZADD", "racers", "1.0", "first", "2.0", "second"]);
+    client.expect_reply(":2\r\n");
+    client.send(&["ZRANK", "racers", "first"]);
+    client.expect_reply(":0\r\n");
+
+    client.send(&["ZADD", "racers", "9.0", "first"]);
+    client.expect_reply(":0\r\n");
+
+    // Updating a score moves the member, and with it where it falls.
+    client.send(&["ZRANK", "racers", "first"]);
+    client.expect_reply(":1\r\n");
+    client.send(&["ZRANK", "racers", "second"]);
+    client.expect_reply(":0\r\n");
+}
+
+#[test]
+fn refuses_to_place_a_member_of_a_key_holding_something_else() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "racers", "a string"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["ZRANK", "racers", "Sam"]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
+#[test]
+fn refuses_a_zrank_that_names_no_member() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZRANK", "racers"]);
+    client.expect_reply("-ERR wrong number of arguments for 'zrank' command\r\n");
+}
+
+#[test]
 fn calls_what_it_made_a_sorted_set() {
     let server = Server::start();
     let mut client = server.connect();

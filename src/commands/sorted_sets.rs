@@ -11,6 +11,17 @@ pub fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
             [key, scored @ ..] if !scored.is_empty() => add(store, key, scored),
             _ => wrong_arity("zadd"),
         },
+        // Where the member falls, counting from the first. A member with no
+        // place in the order — or a key holding no order at all — is answered
+        // with nothing rather than with a number that would mean the first.
+        "ZRANK" => match args {
+            [key, member] => match store.zrank(key, member) {
+                Ok(Some(rank)) => Value::Integer(rank as i64),
+                Ok(None) => Value::Null,
+                Err(WrongType) => wrong_type(),
+            },
+            _ => wrong_arity("zrank"),
+        },
         _ => return None,
     };
 
@@ -184,6 +195,48 @@ mod tests {
         store.set(named("racers"), named("a string"), None);
 
         assert_eq!(zadd(&["racers", "8.0", "Sam"], &store), wrong_type());
+    }
+
+    fn zrank(words: &[&str], store: &Store) -> Value {
+        run("ZRANK", &scored(words), store).expect("zrank belongs to this module")
+    }
+
+    #[test]
+    fn says_where_a_member_falls_in_the_order() {
+        let store = Store::default();
+
+        zadd(&["racers", "1.0", "one", "2.0", "two"], &store);
+
+        assert_eq!(zrank(&["racers", "one"], &store), Value::Integer(0));
+        assert_eq!(zrank(&["racers", "two"], &store), Value::Integer(1));
+    }
+
+    #[test]
+    fn says_nothing_of_a_member_or_a_set_that_is_not_there() {
+        let store = Store::default();
+
+        zadd(&["racers", "1.0", "one"], &store);
+
+        assert_eq!(zrank(&["racers", "nobody"], &store), Value::Null);
+        assert_eq!(zrank(&["nothing", "one"], &store), Value::Null);
+    }
+
+    #[test]
+    fn refuses_a_zrank_that_names_no_member() {
+        let store = Store::default();
+
+        for command in [vec![], vec!["racers"], vec!["racers", "one", "extra"]] {
+            assert_eq!(zrank(&command, &store), wrong_arity("zrank"), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn will_not_place_a_member_of_a_key_holding_something_else() {
+        let store = Store::default();
+
+        store.set(named("racers"), named("a string"), None);
+
+        assert_eq!(zrank(&["racers", "Sam"], &store), wrong_type());
     }
 
     #[test]

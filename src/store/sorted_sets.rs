@@ -40,13 +40,21 @@ impl SortedSet {
     /// was. Scores are no help in the finding: it is the new score that is
     /// being put in place of the old.
     fn take(&mut self, name: &Bytes) -> bool {
-        match self.0.iter().position(|member| member.name == name) {
+        match self.at(name) {
             Some(at) => {
                 self.0.remove(at);
                 true
             }
             None => false,
         }
+    }
+
+    /// Where a member falls in the order, counting from the first.
+    ///
+    /// Looked for by name rather than by score, since the name is all the asker
+    /// has. What it gets back is a place in an order the scores decided.
+    fn at(&self, name: &Bytes) -> Option<usize> {
+        self.0.iter().position(|member| member.name == name)
     }
 }
 
@@ -90,6 +98,25 @@ impl Store {
         entry.version = version;
 
         Ok(added)
+    }
+
+    /// Where a member falls in the sorted set at `key`, counting from the first.
+    ///
+    /// `None` covers both a member the set does not hold and a key holding no
+    /// set at all: neither has a place in an order, and Redis makes no
+    /// distinction between them here.
+    pub fn zrank(&self, key: &Bytes, member: &Bytes) -> Result<Option<usize>, WrongType> {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        match state.entries.get(key) {
+            None => Ok(None),
+            Some(Entry {
+                data: Data::SortedSet(set),
+                ..
+            }) => Ok(set.at(member)),
+            Some(_) => Err(WrongType),
+        }
     }
 }
 
@@ -237,5 +264,63 @@ mod tests {
         store.set(key.clone(), named("a string"), None);
 
         assert_eq!(store.zadd(&key, &[(8.0, named("Sam"))]), Err(WrongType));
+    }
+
+    #[test]
+    fn says_where_each_member_falls_in_the_order() {
+        let store = Store::default();
+        let key = named("racers");
+        let members = [
+            (14.5, named("Prickett")),
+            (6.1, named("Ford")),
+            (8.2, named("Royce")),
+        ];
+
+        store.zadd(&key, &members).unwrap();
+
+        assert_eq!(store.zrank(&key, &named("Ford")), Ok(Some(0)));
+        assert_eq!(store.zrank(&key, &named("Royce")), Ok(Some(1)));
+        assert_eq!(store.zrank(&key, &named("Prickett")), Ok(Some(2)));
+    }
+
+    #[test]
+    fn says_where_a_member_falls_once_its_score_has_moved() {
+        let store = Store::default();
+        let key = named("racers");
+
+        store
+            .zadd(&key, &[(1.0, named("first")), (2.0, named("second"))])
+            .unwrap();
+        store.zadd(&key, &[(9.0, named("first"))]).unwrap();
+
+        assert_eq!(store.zrank(&key, &named("second")), Ok(Some(0)));
+        assert_eq!(store.zrank(&key, &named("first")), Ok(Some(1)));
+    }
+
+    #[test]
+    fn says_nothing_of_a_member_the_set_does_not_hold() {
+        let store = Store::default();
+        let key = named("racers");
+
+        store.zadd(&key, &[(8.0, named("Sam"))]).unwrap();
+
+        assert_eq!(store.zrank(&key, &named("nobody")), Ok(None));
+    }
+
+    #[test]
+    fn says_nothing_of_a_member_of_a_set_that_is_not_there() {
+        let store = Store::default();
+
+        assert_eq!(store.zrank(&named("nothing"), &named("Sam")), Ok(None));
+    }
+
+    #[test]
+    fn will_not_place_a_member_of_a_key_holding_something_else() {
+        let store = Store::default();
+        let key = named("racers");
+
+        store.set(key.clone(), named("a string"), None);
+
+        assert_eq!(store.zrank(&key, &named("Sam")), Err(WrongType));
     }
 }
