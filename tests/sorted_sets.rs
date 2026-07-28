@@ -199,6 +199,105 @@ fn says_where_a_member_falls_once_its_score_has_moved() {
     client.expect_reply(":0\r\n");
 }
 
+/// The set the tester builds, and a client that has just built it.
+fn with_a_zset(server: &Server) -> common::Client {
+    let mut client = server.connect();
+
+    for (score, member) in [
+        ("100.0", "foo"),
+        ("100.0", "bar"),
+        ("20.0", "baz"),
+        ("30.1", "caz"),
+        ("40.2", "paz"),
+    ] {
+        client.send(&["ZADD", "zset_key", score, member]);
+        client.expect_reply(":1\r\n");
+    }
+
+    client
+}
+
+#[test]
+fn lists_the_members_between_two_places_in_the_order() {
+    let server = Server::start();
+    let mut client = with_a_zset(&server);
+
+    // Ordered baz, caz, paz, bar, foo.
+    client.send(&["ZRANGE", "zset_key", "2", "4"]);
+    client.expect_reply("*3\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nfoo\r\n");
+
+    client.send(&["ZRANGE", "zset_key", "0", "1"]);
+    client.expect_reply("*2\r\n$3\r\nbaz\r\n$3\r\ncaz\r\n");
+
+    client.send(&["ZRANGE", "zset_key", "1", "1"]);
+    client.expect_reply("*1\r\n$3\r\ncaz\r\n");
+}
+
+#[test]
+fn lists_as_far_as_the_set_goes_when_the_window_reaches_past_it() {
+    let server = Server::start();
+    let mut client = with_a_zset(&server);
+
+    client.send(&["ZRANGE", "zset_key", "3", "99"]);
+    client.expect_reply("*2\r\n$3\r\nbar\r\n$3\r\nfoo\r\n");
+
+    client.send(&["ZRANGE", "zset_key", "0", "99"]);
+    client.expect_reply("*5\r\n$3\r\nbaz\r\n$3\r\ncaz\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nfoo\r\n");
+}
+
+#[test]
+fn lists_nothing_when_the_window_falls_outside_the_set() {
+    let server = Server::start();
+    let mut client = with_a_zset(&server);
+
+    // Starting past the last member, and ending before it starts.
+    client.send(&["ZRANGE", "zset_key", "5", "9"]);
+    client.expect_reply("*0\r\n");
+    client.send(&["ZRANGE", "zset_key", "3", "2"]);
+    client.expect_reply("*0\r\n");
+}
+
+#[test]
+fn lists_nothing_of_a_set_that_is_not_there() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZRANGE", "missing_key", "0", "9"]);
+    client.expect_reply("*0\r\n");
+}
+
+#[test]
+fn refuses_a_window_that_is_not_counted_in_whole_numbers() {
+    let server = Server::start();
+    let mut client = with_a_zset(&server);
+
+    for (start, stop) in [("one", "2"), ("0", "two"), ("0.5", "2")] {
+        client.send(&["ZRANGE", "zset_key", start, stop]);
+        client.expect_reply("-ERR value is not an integer or out of range\r\n");
+    }
+}
+
+#[test]
+fn refuses_to_list_the_members_of_a_key_holding_something_else() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "racers", "a string"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["ZRANGE", "racers", "0", "9"]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
+#[test]
+fn refuses_a_zrange_that_names_no_window() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZRANGE", "zset_key", "0"]);
+    client.expect_reply("-ERR wrong number of arguments for 'zrange' command\r\n");
+}
+
 #[test]
 fn refuses_to_place_a_member_of_a_key_holding_something_else() {
     let server = Server::start();

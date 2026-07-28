@@ -1,4 +1,4 @@
-use super::{Data, Entry, Store, WrongType, drop_if_expired};
+use super::{Data, Entry, Store, WrongType, drop_if_expired, resolve_index};
 use bytes::Bytes;
 use std::cmp::Ordering;
 
@@ -117,6 +117,39 @@ impl Store {
             }) => Ok(set.at(member)),
             Some(_) => Err(WrongType),
         }
+    }
+
+    /// The members of the sorted set at `key` between `start` and `stop`, both
+    /// inclusive and counted from the first.
+    ///
+    /// A window falling outside the set is no error: it is drawn in, and yields
+    /// fewer members or none at all. A key holding no set yields none, as an
+    /// empty set would.
+    pub fn zrange(&self, key: &Bytes, start: i64, stop: i64) -> Result<Vec<Bytes>, WrongType> {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        let set = match state.entries.get(key) {
+            None => return Ok(Vec::new()),
+            Some(Entry {
+                data: Data::SortedSet(set),
+                ..
+            }) => set,
+            Some(_) => return Err(WrongType),
+        };
+
+        let start = resolve_index(start, set.0.len());
+        let stop = resolve_index(stop, set.0.len());
+
+        if start > stop || start >= set.0.len() {
+            return Ok(Vec::new());
+        }
+
+        let stop = stop.min(set.0.len() - 1);
+        Ok(set.0[start..=stop]
+            .iter()
+            .map(|member| member.name.clone())
+            .collect())
     }
 }
 
@@ -312,6 +345,108 @@ mod tests {
         let store = Store::default();
 
         assert_eq!(store.zrank(&named("nothing"), &named("Sam")), Ok(None));
+    }
+
+    /// A set holding four members, in the order they come out in.
+    fn racers(store: &Store) -> Bytes {
+        let key = named("racers");
+        let members = [
+            (8.1, named("Sam-Bodden")),
+            (10.2, named("Royce")),
+            (6.0, named("Ford")),
+            (14.1, named("Prickett")),
+        ];
+
+        store.zadd(&key, &members).unwrap();
+
+        key
+    }
+
+    /// The names `zrange` hands back, as text.
+    fn listed(members: Result<Vec<Bytes>, WrongType>) -> Vec<String> {
+        members
+            .expect("a set the test made")
+            .iter()
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn lists_the_members_between_two_places_in_the_order() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        assert_eq!(
+            listed(store.zrange(&key, 0, 2)),
+            ["Ford", "Sam-Bodden", "Royce"]
+        );
+    }
+
+    #[test]
+    fn lists_the_one_member_a_window_of_one_holds() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        assert_eq!(listed(store.zrange(&key, 1, 1)), ["Sam-Bodden"]);
+    }
+
+    #[test]
+    fn lists_as_far_as_the_set_goes_when_the_window_reaches_past_it() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        assert_eq!(
+            listed(store.zrange(&key, 2, 99)),
+            ["Royce", "Prickett"],
+            "the far end is drawn in to the last member"
+        );
+    }
+
+    #[test]
+    fn lists_nothing_when_the_window_starts_past_the_set() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        assert!(listed(store.zrange(&key, 4, 9)).is_empty());
+        assert!(listed(store.zrange(&key, 99, 99)).is_empty());
+    }
+
+    #[test]
+    fn lists_nothing_when_the_window_ends_before_it_starts() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        assert!(listed(store.zrange(&key, 2, 1)).is_empty());
+    }
+
+    #[test]
+    fn lists_nothing_of_a_set_that_is_not_there() {
+        let store = Store::default();
+
+        assert!(listed(store.zrange(&named("nothing"), 0, 9)).is_empty());
+    }
+
+    #[test]
+    fn lists_the_members_in_the_order_their_scores_put_them() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        // Added in one order, listed in another: the scores decide, not the
+        // asking.
+        assert_eq!(
+            listed(store.zrange(&key, 0, 9)),
+            ["Ford", "Sam-Bodden", "Royce", "Prickett"]
+        );
+    }
+
+    #[test]
+    fn will_not_list_the_members_of_a_key_holding_something_else() {
+        let store = Store::default();
+        let key = named("racers");
+
+        store.set(key.clone(), named("a string"), None);
+
+        assert_eq!(store.zrange(&key, 0, 9), Err(WrongType));
     }
 
     #[test]

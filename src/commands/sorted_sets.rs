@@ -1,4 +1,4 @@
-use super::{text, wrong_arity, wrong_type};
+use super::{not_an_integer, text, wrong_arity, wrong_type};
 use crate::resp::Value;
 use crate::store::{Store, WrongType};
 use bytes::Bytes;
@@ -22,6 +22,13 @@ pub fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
             },
             _ => wrong_arity("zrank"),
         },
+        // The members between two places in the order, the one at the far end
+        // included. A window that falls outside the set yields what of it lies
+        // inside, which may be nothing.
+        "ZRANGE" => match args {
+            [key, start, stop] => range(store, key, start, stop),
+            _ => wrong_arity("zrange"),
+        },
         _ => return None,
     };
 
@@ -43,6 +50,24 @@ fn add(store: &Store, key: &Bytes, scored: &[Bytes]) -> Value {
         Ok(added) => Value::Integer(added as i64),
         Err(WrongType) => wrong_type(),
     }
+}
+
+/// Lists the members between two places in the order.
+fn range(store: &Store, key: &Bytes, start: &Bytes, stop: &Bytes) -> Value {
+    let (Some(start), Some(stop)) = (index(start), index(stop)) else {
+        return not_an_integer();
+    };
+
+    match store.zrange(key, start, stop) {
+        Ok(members) => Value::Array(members.into_iter().map(Value::BulkString).collect()),
+        Err(WrongType) => wrong_type(),
+    }
+}
+
+/// Reads a place in the order. Redis counts these in whole numbers, and takes
+/// nothing else for one.
+fn index(index: &Bytes) -> Option<i64> {
+    text(index).and_then(|index| index.parse().ok())
 }
 
 /// Reads the scores and members that follow the key, each score before the

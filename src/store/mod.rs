@@ -189,6 +189,20 @@ impl Entry {
     }
 }
 
+/// Turns an index into an offset from the start. Negative indexes count back
+/// from the end, and one reaching past the start clamps to the first element
+/// rather than wrapping around.
+///
+/// Lists and sorted sets are both read off by where their elements fall, and
+/// Redis counts them the same way.
+fn resolve_index(index: i64, len: usize) -> usize {
+    if index >= 0 {
+        index as usize
+    } else {
+        len.saturating_sub(index.unsigned_abs() as usize)
+    }
+}
+
 /// Redis expires keys lazily, so drop this one now that we are looking at it.
 fn drop_if_expired(entries: &mut Entries, key: &Bytes) {
     if entries.get(key).is_some_and(Entry::has_expired) {
