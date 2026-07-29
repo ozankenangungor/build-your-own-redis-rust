@@ -440,6 +440,44 @@ mod tests {
     }
 
     #[test]
+    fn counts_a_place_back_from_the_end_when_it_is_given_one() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        // Ford, Sam-Bodden, Royce, Prickett.
+        assert_eq!(listed(store.zrange(&key, -2, -1)), ["Royce", "Prickett"]);
+        assert_eq!(listed(store.zrange(&key, -1, -1)), ["Prickett"]);
+        assert_eq!(
+            listed(store.zrange(&key, 0, -3)),
+            ["Ford", "Sam-Bodden"],
+            "the far end counts back too"
+        );
+    }
+
+    #[test]
+    fn starts_at_the_first_member_when_it_is_told_to_count_back_past_it() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        // Reaching back further than the set is long lands at the start rather
+        // than wrapping round to the end.
+        assert_eq!(
+            listed(store.zrange(&key, -99, -1)),
+            ["Ford", "Sam-Bodden", "Royce", "Prickett"]
+        );
+        assert_eq!(listed(store.zrange(&key, -99, 1)), ["Ford", "Sam-Bodden"]);
+    }
+
+    #[test]
+    fn lists_nothing_when_a_place_counted_back_ends_before_it_starts() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        assert!(listed(store.zrange(&key, -1, -2)).is_empty());
+        assert!(listed(store.zrange(&key, 3, -2)).is_empty());
+    }
+
+    #[test]
     fn will_not_list_the_members_of_a_key_holding_something_else() {
         let store = Store::default();
         let key = named("racers");

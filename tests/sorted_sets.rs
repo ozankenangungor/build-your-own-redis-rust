@@ -245,6 +245,77 @@ fn lists_as_far_as_the_set_goes_when_the_window_reaches_past_it() {
     client.expect_reply("*5\r\n$3\r\nbaz\r\n$3\r\ncaz\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nfoo\r\n");
 }
 
+/// The set the tester builds for the places counted back from the end. It comes
+/// out in the order foo, caz, paz, bar, baz.
+fn with_a_zset_to_count_back_through(server: &Server) -> common::Client {
+    let mut client = server.connect();
+
+    for (score, member) in [
+        ("20.0", "foo"),
+        ("30.1", "bar"),
+        ("40.2", "baz"),
+        ("25.0", "paz"),
+        ("25.0", "caz"),
+    ] {
+        client.send(&["ZADD", "zset_key", score, member]);
+        client.expect_reply(":1\r\n");
+    }
+
+    client
+}
+
+#[test]
+fn counts_a_place_back_from_the_end_when_it_is_given_one() {
+    let server = Server::start();
+    let mut client = with_a_zset_to_count_back_through(&server);
+
+    client.send(&["ZRANGE", "zset_key", "2", "-1"]);
+    client.expect_reply("*3\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nbaz\r\n");
+
+    client.send(&["ZRANGE", "zset_key", "-2", "-1"]);
+    client.expect_reply("*2\r\n$3\r\nbar\r\n$3\r\nbaz\r\n");
+
+    client.send(&["ZRANGE", "zset_key", "0", "-3"]);
+    client.expect_reply("*3\r\n$3\r\nfoo\r\n$3\r\ncaz\r\n$3\r\npaz\r\n");
+
+    client.send(&["ZRANGE", "zset_key", "-1", "-1"]);
+    client.expect_reply("*1\r\n$3\r\nbaz\r\n");
+}
+
+#[test]
+fn starts_at_the_first_member_when_it_is_told_to_count_back_past_it() {
+    let server = Server::start();
+    let mut client = with_a_zset_to_count_back_through(&server);
+
+    // Reaching back further than the set is long lands at the start rather
+    // than wrapping round to the end.
+    client.send(&["ZRANGE", "zset_key", "-99", "-1"]);
+    client.expect_reply("*5\r\n$3\r\nfoo\r\n$3\r\ncaz\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nbaz\r\n");
+
+    client.send(&["ZRANGE", "zset_key", "-99", "2"]);
+    client.expect_reply("*3\r\n$3\r\nfoo\r\n$3\r\ncaz\r\n$3\r\npaz\r\n");
+}
+
+#[test]
+fn lists_nothing_when_a_place_counted_back_ends_before_it_starts() {
+    let server = Server::start();
+    let mut client = with_a_zset_to_count_back_through(&server);
+
+    client.send(&["ZRANGE", "zset_key", "-1", "-2"]);
+    client.expect_reply("*0\r\n");
+    client.send(&["ZRANGE", "zset_key", "3", "-3"]);
+    client.expect_reply("*0\r\n");
+}
+
+#[test]
+fn lists_nothing_counted_back_through_a_set_that_is_not_there() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZRANGE", "missing_key", "-2", "-1"]);
+    client.expect_reply("*0\r\n");
+}
+
 #[test]
 fn lists_nothing_when_the_window_falls_outside_the_set() {
     let server = Server::start();
