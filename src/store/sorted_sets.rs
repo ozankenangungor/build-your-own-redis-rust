@@ -56,6 +56,14 @@ impl SortedSet {
     fn at(&self, name: &Bytes) -> Option<usize> {
         self.0.iter().position(|member| member.name == name)
     }
+
+    /// The score a member was given, which is what put it where it is.
+    fn score(&self, name: &Bytes) -> Option<f64> {
+        self.0
+            .iter()
+            .find(|member| member.name == name)
+            .map(|member| member.score)
+    }
 }
 
 /// Whether one member comes before another: by score, and by name where the
@@ -115,6 +123,24 @@ impl Store {
                 data: Data::SortedSet(set),
                 ..
             }) => Ok(set.at(member)),
+            Some(_) => Err(WrongType),
+        }
+    }
+
+    /// The score the member has in the sorted set at `key`.
+    ///
+    /// `None` covers both a member the set does not hold and a key holding no
+    /// set at all, as [`Store::zrank`] does: neither has a score to give.
+    pub fn zscore(&self, key: &Bytes, member: &Bytes) -> Result<Option<f64>, WrongType> {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        match state.entries.get(key) {
+            None => Ok(None),
+            Some(Entry {
+                data: Data::SortedSet(set),
+                ..
+            }) => Ok(set.score(member)),
             Some(_) => Err(WrongType),
         }
     }

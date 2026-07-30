@@ -22,6 +22,16 @@ pub fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
             },
             _ => wrong_arity("zrank"),
         },
+        // The score that put a member where it is, written back out. A member
+        // with no score — or a key holding no order — is answered with nothing.
+        "ZSCORE" => match args {
+            [key, member] => match store.zscore(key, member) {
+                Ok(Some(score)) => Value::BulkString(written(score)),
+                Ok(None) => Value::Null,
+                Err(WrongType) => wrong_type(),
+            },
+            _ => wrong_arity("zscore"),
+        },
         // How many members the set holds. A key holding no set holds none, and
         // is answered with a nought rather than with nothing.
         "ZCARD" => match args {
@@ -71,6 +81,15 @@ fn range(store: &Store, key: &Bytes, start: &Bytes, stop: &Bytes) -> Value {
         Ok(members) => Value::Array(members.into_iter().map(Value::BulkString).collect()),
         Err(WrongType) => wrong_type(),
     }
+}
+
+/// Writes a score back out the way Redis writes one.
+///
+/// The shortest spelling that reads back as the same number, so that what a
+/// client is told is what it gave: a score of `20` comes back as `20` rather
+/// than `20.0`, and one too large to write out comes back as `inf`.
+fn written(score: f64) -> Bytes {
+    Bytes::from(score.to_string())
 }
 
 /// Reads a place in the order. Redis counts these in whole numbers, and takes
@@ -271,6 +290,85 @@ mod tests {
         store.set(named("racers"), named("a string"), None);
 
         assert_eq!(zrank(&["racers", "Sam"], &store), wrong_type());
+    }
+
+    fn zscore(words: &[&str], store: &Store) -> Value {
+        run("ZSCORE", &scored(words), store).expect("zscore belongs to this module")
+    }
+
+    #[test]
+    fn writes_a_score_back_out_the_way_redis_writes_one() {
+        for (score, spelled) in [
+            (30.1, "30.1"),
+            (100.99, "100.99"),
+            (-1.5, "-1.5"),
+            (0.0043, "0.0043"),
+            // A score that happens to be whole is written as one, without the
+            // point Redis never prints.
+            (20.0, "20"),
+            (0.0, "0"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+        ] {
+            assert_eq!(written(score), spelled, "{score}");
+        }
+    }
+
+    #[test]
+    fn says_the_score_a_member_was_given() {
+        let store = Store::default();
+
+        zadd(&["racers", "24.34", "one", "90.34", "two"], &store);
+
+        assert_eq!(
+            zscore(&["racers", "one"], &store),
+            Value::BulkString(named("24.34"))
+        );
+    }
+
+    #[test]
+    fn says_the_score_a_member_has_now() {
+        let store = Store::default();
+
+        zadd(&["racers", "24.34", "one"], &store);
+        zadd(&["racers", "100.99", "one"], &store);
+
+        assert_eq!(
+            zscore(&["racers", "one"], &store),
+            Value::BulkString(named("100.99"))
+        );
+    }
+
+    #[test]
+    fn says_nothing_of_the_score_of_a_member_or_a_set_that_is_not_there() {
+        let store = Store::default();
+
+        zadd(&["racers", "1.0", "one"], &store);
+
+        assert_eq!(zscore(&["racers", "nobody"], &store), Value::Null);
+        assert_eq!(zscore(&["nothing", "one"], &store), Value::Null);
+    }
+
+    #[test]
+    fn refuses_a_zscore_that_names_no_member() {
+        let store = Store::default();
+
+        for command in [vec![], vec!["racers"], vec!["racers", "one", "extra"]] {
+            assert_eq!(
+                zscore(&command, &store),
+                wrong_arity("zscore"),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn will_not_score_a_member_of_a_key_holding_something_else() {
+        let store = Store::default();
+
+        store.set(named("racers"), named("a string"), None);
+
+        assert_eq!(zscore(&["racers", "Sam"], &store), wrong_type());
     }
 
     #[test]

@@ -370,6 +370,91 @@ fn refuses_a_zrange_that_names_no_window() {
 }
 
 #[test]
+fn says_the_score_a_member_was_given() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for (score, member) in [
+        ("20.0", "zset_member1"),
+        ("30.1", "zset_member2"),
+        ("40.2", "zset_member3"),
+        ("50.3", "zset_member4"),
+    ] {
+        client.send(&["ZADD", "zset_key", score, member]);
+        client.expect_reply(":1\r\n");
+    }
+
+    client.send(&["ZSCORE", "zset_key", "zset_member2"]);
+    client.expect_reply("$4\r\n30.1\r\n");
+
+    // Updating the score is what the next ask should turn up.
+    client.send(&["ZADD", "zset_key", "100.99", "zset_member2"]);
+    client.expect_reply(":0\r\n");
+    client.send(&["ZSCORE", "zset_key", "zset_member2"]);
+    client.expect_reply("$6\r\n100.99\r\n");
+}
+
+#[test]
+fn says_nothing_of_the_score_of_a_member_or_a_set_that_is_not_there() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZADD", "zset_key", "20.0", "zset_member1"]);
+    client.expect_reply(":1\r\n");
+
+    client.send(&["ZSCORE", "zset_key", "zset_member100"]);
+    client.expect_reply("$-1\r\n");
+    client.send(&["ZSCORE", "missing_key", "member"]);
+    client.expect_reply("$-1\r\n");
+}
+
+#[test]
+fn writes_a_score_back_out_the_way_redis_writes_one() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for (given, written) in [
+        ("24.34", "24.34"),
+        ("0.0043", "0.0043"),
+        ("-1.5", "-1.5"),
+        // A score that happens to be whole comes back without the point Redis
+        // never prints, however it was spelled going in.
+        ("20.0", "20"),
+        ("8", "8"),
+        ("1e3", "1000"),
+        ("inf", "inf"),
+        ("-inf", "-inf"),
+    ] {
+        client.send(&["ZADD", "racers", given, "member"]);
+        client.read_reply();
+
+        client.send(&["ZSCORE", "racers", "member"]);
+        client.expect_reply(&format!("${}\r\n{written}\r\n", written.len()));
+    }
+}
+
+#[test]
+fn refuses_to_score_a_member_of_a_key_holding_something_else() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "racers", "a string"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["ZSCORE", "racers", "Sam"]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
+#[test]
+fn refuses_a_zscore_that_names_no_member() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZSCORE", "racers"]);
+    client.expect_reply("-ERR wrong number of arguments for 'zscore' command\r\n");
+}
+
+#[test]
 fn counts_the_members_a_set_holds() {
     let server = Server::start();
     let mut client = server.connect();
