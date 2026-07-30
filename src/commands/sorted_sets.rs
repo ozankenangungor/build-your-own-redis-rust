@@ -22,6 +22,15 @@ pub fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
             },
             _ => wrong_arity("zrank"),
         },
+        // How many members the set holds. A key holding no set holds none, and
+        // is answered with a nought rather than with nothing.
+        "ZCARD" => match args {
+            [key] => match store.zcard(key) {
+                Ok(members) => Value::Integer(members as i64),
+                Err(WrongType) => wrong_type(),
+            },
+            _ => wrong_arity("zcard"),
+        },
         // The members between two places in the order, the one at the far end
         // included. A window that falls outside the set yields what of it lies
         // inside, which may be nothing.

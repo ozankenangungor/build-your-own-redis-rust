@@ -119,6 +119,23 @@ impl Store {
         }
     }
 
+    /// How many members the sorted set at `key` holds. A key holding no set at
+    /// all holds none, which is what an empty set would answer too: Redis keeps
+    /// no set with nothing in it.
+    pub fn zcard(&self, key: &Bytes) -> Result<usize, WrongType> {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        match state.entries.get(key) {
+            None => Ok(0),
+            Some(Entry {
+                data: Data::SortedSet(set),
+                ..
+            }) => Ok(set.0.len()),
+            Some(_) => Err(WrongType),
+        }
+    }
+
     /// The members of the sorted set at `key` between `start` and `stop`, both
     /// inclusive and counted from the first.
     ///
@@ -437,6 +454,41 @@ mod tests {
             listed(store.zrange(&key, 0, 9)),
             ["Ford", "Sam-Bodden", "Royce", "Prickett"]
         );
+    }
+
+    #[test]
+    fn counts_the_members_a_set_holds() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        assert_eq!(store.zcard(&key), Ok(4));
+    }
+
+    #[test]
+    fn counts_no_more_for_a_member_whose_score_has_moved() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        store.zadd(&key, &[(99.0, named("Ford"))]).unwrap();
+
+        assert_eq!(store.zcard(&key), Ok(4));
+    }
+
+    #[test]
+    fn counts_nothing_in_a_set_that_is_not_there() {
+        let store = Store::default();
+
+        assert_eq!(store.zcard(&named("nothing")), Ok(0));
+    }
+
+    #[test]
+    fn will_not_count_the_members_of_a_key_holding_something_else() {
+        let store = Store::default();
+        let key = named("racers");
+
+        store.set(key.clone(), named("a string"), None);
+
+        assert_eq!(store.zcard(&key), Err(WrongType));
     }
 
     #[test]

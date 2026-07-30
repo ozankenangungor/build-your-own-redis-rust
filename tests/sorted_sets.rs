@@ -370,6 +370,76 @@ fn refuses_a_zrange_that_names_no_window() {
 }
 
 #[test]
+fn counts_the_members_a_set_holds() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for (score, member) in [
+        ("20.0", "zset_member1"),
+        ("30.1", "zset_member2"),
+        ("40.2", "zset_member3"),
+        ("50.3", "zset_member4"),
+    ] {
+        client.send(&["ZADD", "zset_key", score, member]);
+        client.expect_reply(":1\r\n");
+    }
+
+    client.send(&["ZCARD", "zset_key"]);
+    client.expect_reply(":4\r\n");
+
+    // Updating a member's score moves it; it does not make another of it.
+    client.send(&["ZADD", "zset_key", "100.0", "zset_member1"]);
+    client.expect_reply(":0\r\n");
+    client.send(&["ZCARD", "zset_key"]);
+    client.expect_reply(":4\r\n");
+}
+
+#[test]
+fn counts_nothing_in_a_set_that_is_not_there() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZCARD", "missing_key"]);
+    client.expect_reply(":0\r\n");
+}
+
+#[test]
+fn counts_the_members_as_the_set_grows() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for (member, count) in [("one", 1), ("two", 2), ("three", 3)] {
+        client.send(&["ZADD", "racers", "1.0", member]);
+        client.read_reply();
+        client.send(&["ZCARD", "racers"]);
+        client.expect_reply(&format!(":{count}\r\n"));
+    }
+}
+
+#[test]
+fn refuses_to_count_the_members_of_a_key_holding_something_else() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "racers", "a string"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["ZCARD", "racers"]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
+#[test]
+fn refuses_a_zcard_that_names_no_key() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZCARD"]);
+    client.expect_reply("-ERR wrong number of arguments for 'zcard' command\r\n");
+    client.send(&["ZCARD", "racers", "extra"]);
+    client.expect_reply("-ERR wrong number of arguments for 'zcard' command\r\n");
+}
+
+#[test]
 fn refuses_to_place_a_member_of_a_key_holding_something_else() {
     let server = Server::start();
     let mut client = server.connect();
