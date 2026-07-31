@@ -1,3 +1,4 @@
+mod geo;
 mod info;
 mod keys;
 mod lists;
@@ -178,6 +179,9 @@ async fn run_against(
         return reply;
     }
     if let Some(reply) = sorted_sets::run(uppercased, args, store) {
+        return reply;
+    }
+    if let Some(reply) = geo::run(uppercased, args) {
         return reply;
     }
     if let Some(reply) = keys::run(uppercased, args, store) {
