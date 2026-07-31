@@ -22,6 +22,15 @@ pub fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
             },
             _ => wrong_arity("zrank"),
         },
+        // How many of the members named were there to take out. One the set was
+        // never holding is none the worse for being asked after.
+        "ZREM" => match args {
+            [key, members @ ..] if !members.is_empty() => match store.zrem(key, members) {
+                Ok(removed) => Value::Integer(removed as i64),
+                Err(WrongType) => wrong_type(),
+            },
+            _ => wrong_arity("zrem"),
+        },
         // The score that put a member where it is, written back out. A member
         // with no score — or a key holding no order — is answered with nothing.
         "ZSCORE" => match args {

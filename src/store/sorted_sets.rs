@@ -127,6 +127,45 @@ impl Store {
         }
     }
 
+    /// Takes these members out of the sorted set at `key`, and says how many of
+    /// them were there to take.
+    ///
+    /// A set left with nothing in it goes with them. Redis keeps no empty sets,
+    /// so a key emptied this way is a key that is no longer there.
+    pub fn zrem(&self, key: &Bytes, members: &[Bytes]) -> Result<usize, WrongType> {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        let version = state.next_version();
+        let Some(entry) = state.entries.get_mut(key) else {
+            return Ok(0);
+        };
+
+        let Data::SortedSet(set) = &mut entry.data else {
+            return Err(WrongType);
+        };
+
+        let mut removed = 0;
+        for name in members {
+            if set.take(name) {
+                removed += 1;
+            }
+        }
+
+        let emptied = set.0.is_empty();
+
+        // A command that took nothing left the key as it found it, and a client
+        // watching it has no reason to hear about it.
+        if removed > 0 {
+            entry.version = version;
+        }
+        if emptied {
+            state.entries.remove(key);
+        }
+
+        Ok(removed)
+    }
+
     /// The score the member has in the sorted set at `key`.
     ///
     /// `None` covers both a member the set does not hold and a key holding no
@@ -480,6 +519,72 @@ mod tests {
             listed(store.zrange(&key, 0, 9)),
             ["Ford", "Sam-Bodden", "Royce", "Prickett"]
         );
+    }
+
+    #[test]
+    fn takes_out_the_member_it_is_given() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        assert_eq!(store.zrem(&key, &[named("Royce")]), Ok(1));
+        assert_eq!(
+            listed(store.zrange(&key, 0, -1)),
+            ["Ford", "Sam-Bodden", "Prickett"]
+        );
+    }
+
+    #[test]
+    fn counts_each_of_the_members_it_takes_out() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        let members = [named("Royce"), named("Ford"), named("nobody")];
+        assert_eq!(store.zrem(&key, &members), Ok(2));
+        assert_eq!(store.zcard(&key), Ok(2));
+    }
+
+    #[test]
+    fn counts_nothing_for_a_member_the_set_was_never_holding() {
+        let store = Store::default();
+        let key = racers(&store);
+
+        assert_eq!(store.zrem(&key, &[named("nobody")]), Ok(0));
+        assert_eq!(store.zcard(&key), Ok(4));
+    }
+
+    #[test]
+    fn counts_nothing_taken_out_of_a_set_that_is_not_there() {
+        let store = Store::default();
+
+        assert_eq!(store.zrem(&named("nothing"), &[named("Sam")]), Ok(0));
+    }
+
+    #[test]
+    fn lets_go_of_a_key_whose_set_it_has_emptied() {
+        let store = Store::default();
+        let key = racers(&store);
+        let members = [
+            named("Ford"),
+            named("Sam-Bodden"),
+            named("Royce"),
+            named("Prickett"),
+        ];
+
+        assert_eq!(store.zrem(&key, &members), Ok(4));
+
+        // Redis keeps no set with nothing in it, so the key goes with the last
+        // member out of it.
+        assert!(store.keys(|_| true).is_empty());
+    }
+
+    #[test]
+    fn will_not_take_a_member_out_of_a_key_holding_something_else() {
+        let store = Store::default();
+        let key = named("racers");
+
+        store.set(key.clone(), named("a string"), None);
+
+        assert_eq!(store.zrem(&key, &[named("Sam")]), Err(WrongType));
     }
 
     #[test]

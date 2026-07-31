@@ -205,7 +205,7 @@ async fn run_against(
 fn changes_the_store(command: &str) -> bool {
     matches!(
         command,
-        "SET" | "INCR" | "RPUSH" | "LPUSH" | "LPOP" | "XADD" | "ZADD"
+        "SET" | "INCR" | "RPUSH" | "LPUSH" | "LPOP" | "XADD" | "ZADD" | "ZREM"
     )
 }
 

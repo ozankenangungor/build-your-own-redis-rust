@@ -370,6 +370,116 @@ fn refuses_a_zrange_that_names_no_window() {
 }
 
 #[test]
+fn takes_out_the_member_it_is_given() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for (score, member) in [("80.5", "foo"), ("50.3", "baz"), ("80.5", "bar")] {
+        client.send(&["ZADD", "zset_key", score, member]);
+        client.expect_reply(":1\r\n");
+    }
+
+    client.send(&["ZREM", "zset_key", "baz"]);
+    client.expect_reply(":1\r\n");
+
+    // Ordered bar, foo: baz went, and the rest keep the places their scores
+    // gave them.
+    client.send(&["ZRANGE", "zset_key", "0", "-1"]);
+    client.expect_reply("*2\r\n$3\r\nbar\r\n$3\r\nfoo\r\n");
+
+    client.send(&["ZREM", "zset_key", "missing_member"]);
+    client.expect_reply(":0\r\n");
+}
+
+#[test]
+fn counts_each_of_the_members_it_takes_out() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZADD", "racers", "1.0", "one", "2.0", "two", "3.0", "three"]);
+    client.expect_reply(":3\r\n");
+
+    // Two of the three named were there to take out.
+    client.send(&["ZREM", "racers", "one", "nobody", "three"]);
+    client.expect_reply(":2\r\n");
+
+    client.send(&["ZRANGE", "racers", "0", "-1"]);
+    client.expect_reply("*1\r\n$3\r\ntwo\r\n");
+}
+
+#[test]
+fn counts_nothing_taken_out_of_a_set_that_is_not_there() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZREM", "missing_key", "member"]);
+    client.expect_reply(":0\r\n");
+}
+
+#[test]
+fn lets_go_of_a_key_whose_set_it_has_emptied() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZADD", "racers", "1.0", "only"]);
+    client.expect_reply(":1\r\n");
+    client.send(&["ZREM", "racers", "only"]);
+    client.expect_reply(":1\r\n");
+
+    // Redis keeps no set with nothing in it, so the key goes with the last
+    // member out of it.
+    client.send(&["TYPE", "racers"]);
+    client.expect_reply("+none\r\n");
+    client.send(&["KEYS", "*"]);
+    client.expect_reply("*0\r\n");
+    client.send(&["ZCARD", "racers"]);
+    client.expect_reply(":0\r\n");
+}
+
+#[test]
+fn takes_a_member_out_and_leaves_the_places_of_the_rest_in_order() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZADD", "racers", "1.0", "one", "2.0", "two", "3.0", "three"]);
+    client.expect_reply(":3\r\n");
+
+    client.send(&["ZREM", "racers", "one"]);
+    client.expect_reply(":1\r\n");
+
+    // What is left closes up: the second member is now the first.
+    client.send(&["ZRANK", "racers", "two"]);
+    client.expect_reply(":0\r\n");
+    client.send(&["ZRANK", "racers", "three"]);
+    client.expect_reply(":1\r\n");
+    client.send(&["ZRANK", "racers", "one"]);
+    client.expect_reply("$-1\r\n");
+}
+
+#[test]
+fn refuses_to_take_a_member_out_of_a_key_holding_something_else() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "racers", "a string"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["ZREM", "racers", "Sam"]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
+#[test]
+fn refuses_a_zrem_that_names_no_member() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ZREM"]);
+    client.expect_reply("-ERR wrong number of arguments for 'zrem' command\r\n");
+    client.send(&["ZREM", "racers"]);
+    client.expect_reply("-ERR wrong number of arguments for 'zrem' command\r\n");
+}
+
+#[test]
 fn says_the_score_a_member_was_given() {
     let server = Server::start();
     let mut client = server.connect();
