@@ -1,5 +1,6 @@
-use super::{text, wrong_arity};
+use super::{text, wrong_arity, wrong_type};
 use crate::resp::Value;
+use crate::store::{Store, WrongType};
 use bytes::Bytes;
 
 /// How many arguments one location takes: where it is, in two numbers, and what
@@ -25,16 +26,16 @@ pub struct Point {
 /// Handles the commands that work on places on the earth. `None` means the
 /// command belongs to another module.
 ///
-/// Nothing is kept yet. A location is counted as it comes in and let go of
-/// again; where it is to be put, and what is to be made of the numbers, is
-/// still to come.
-pub fn run(command: &str, args: &[Bytes]) -> Option<Value> {
+/// A location is kept as a member of an ordinary sorted set, which is how Redis
+/// keeps one: the two numbers are worked into a single score, and everything a
+/// sorted set can already do works on places as it does on anything else.
+pub fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
     let reply = match command {
         // A key and at least one whole location. Fewer words than that is a
         // command missing an argument; more, but not by a whole location, is
         // one whose arguments do not pair up.
         "GEOADD" => match args {
-            [_key, located @ ..] if located.len() >= PER_LOCATION => add(located),
+            [key, located @ ..] if located.len() >= PER_LOCATION => add(store, key, located),
             _ => wrong_arity("geoadd"),
         },
         _ => return None,
@@ -43,23 +44,39 @@ pub fn run(command: &str, args: &[Bytes]) -> Option<Value> {
     Some(reply)
 }
 
-/// Takes in the locations named, and says how many they were.
+/// Puts the locations named into the sorted set at `key`, and says how many of
+/// them were places it had never held.
 ///
-/// Nothing is kept yet, but a location is still read and looked over before it
-/// is counted: a pair of numbers that names no place on the earth is refused
-/// here rather than stored and puzzled over later.
-fn add(located: &[Bytes]) -> Value {
+/// Every location is read and looked over before any is put away, so that a
+/// pair of numbers naming no place on the earth turns the whole command down
+/// rather than half of it.
+fn add(store: &Store, key: &Bytes, located: &[Bytes]) -> Value {
     if !located.len().is_multiple_of(PER_LOCATION) {
         return syntax_error();
     }
 
+    let mut members = Vec::with_capacity(located.len() / PER_LOCATION);
+
     for location in located.chunks_exact(PER_LOCATION) {
-        if let Err(error) = point(&location[0], &location[1]) {
-            return error;
+        match point(&location[0], &location[1]) {
+            Ok(point) => members.push((score(point), location[2].clone())),
+            Err(error) => return error,
         }
     }
 
-    Value::Integer((located.len() / PER_LOCATION) as i64)
+    match store.zadd(key, &members) {
+        Ok(added) => Value::Integer(added as i64),
+        Err(WrongType) => wrong_type(),
+    }
+}
+
+/// The single number a place is kept under.
+///
+/// Still to be worked out from the two the place was named by. Until it is,
+/// every place is kept under the same one, which is enough to hold a place by
+/// name and no more.
+fn score(_point: Point) -> f64 {
+    0.0
 }
 
 /// Reads a place on the earth from the two numbers that name it.
@@ -119,12 +136,16 @@ mod tests {
     }
 
     fn geoadd(words: &[&str]) -> Value {
+        geoadd_to(words, &Store::default())
+    }
+
+    fn geoadd_to(words: &[&str], store: &Store) -> Value {
         let args: Vec<Bytes> = words
             .iter()
             .map(|word| Bytes::copy_from_slice(word.as_bytes()))
             .collect();
 
-        run("GEOADD", &args).expect("geoadd belongs to this module")
+        run("GEOADD", &args, store).expect("geoadd belongs to this module")
     }
 
     #[test]
@@ -147,6 +168,52 @@ mod tests {
         ];
 
         assert_eq!(geoadd(&command), Value::Integer(2));
+    }
+
+    #[test]
+    fn keeps_the_location_as_a_member_of_a_sorted_set() {
+        let store = Store::default();
+
+        geoadd_to(&["places", "2.2944692", "48.8584625", "Paris"], &store);
+
+        assert_eq!(store.zrank(&named("places"), &named("Paris")), Ok(Some(0)));
+        assert_eq!(store.zcard(&named("places")), Ok(1));
+    }
+
+    #[test]
+    fn counts_nothing_for_a_place_the_key_already_held() {
+        let store = Store::default();
+
+        geoadd_to(&["places", "2.2944692", "48.8584625", "Paris"], &store);
+
+        assert_eq!(
+            geoadd_to(&["places", "11.5030378", "48.1642721", "Paris"], &store),
+            Value::Integer(0)
+        );
+        assert_eq!(store.zcard(&named("places")), Ok(1));
+    }
+
+    #[test]
+    fn keeps_nothing_when_one_of_the_locations_will_not_read() {
+        let store = Store::default();
+        let command = ["places", "11.5", "48.1", "Munich", "181", "0.3", "nowhere"];
+
+        geoadd_to(&command, &store);
+
+        // The good location beside the bad one went nowhere either.
+        assert_eq!(store.zcard(&named("places")), Ok(0));
+    }
+
+    #[test]
+    fn will_not_keep_a_location_under_a_key_holding_something_else() {
+        let store = Store::default();
+
+        store.set(named("places"), named("a string"), None);
+
+        assert_eq!(
+            geoadd_to(&["places", "2.2944692", "48.8584625", "Paris"], &store),
+            wrong_type()
+        );
     }
 
     #[test]
@@ -259,6 +326,6 @@ mod tests {
 
     #[test]
     fn leaves_alone_the_commands_that_are_not_its_own() {
-        assert!(run("GET", &[]).is_none());
+        assert!(run("GET", &[], &Store::default()).is_none());
     }
 }

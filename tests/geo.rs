@@ -30,6 +30,97 @@ fn counts_each_of_the_locations_named_in_one_go() {
 }
 
 #[test]
+fn keeps_the_location_as_a_member_of_a_sorted_set() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["GEOADD", "places", "2.2944692", "48.8584625", "Paris"]);
+    client.expect_reply(":1\r\n");
+
+    client.send(&["ZRANGE", "places", "0", "-1"]);
+    client.expect_reply("*1\r\n$5\r\nParis\r\n");
+}
+
+#[test]
+fn keeps_each_of_the_locations_it_was_given() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&[
+        "GEOADD",
+        "places",
+        "-0.0884948",
+        "51.5006479",
+        "London",
+        "11.5030378",
+        "48.1642721",
+        "Munich",
+    ]);
+    client.expect_reply(":2\r\n");
+
+    client.send(&["ZCARD", "places"]);
+    client.expect_reply(":2\r\n");
+
+    // Every place is kept under the same score for now, so what settles their
+    // order is their names.
+    client.send(&["ZRANGE", "places", "0", "-1"]);
+    client.expect_reply("*2\r\n$6\r\nLondon\r\n$6\r\nMunich\r\n");
+}
+
+#[test]
+fn counts_nothing_for_a_place_the_key_already_held() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["GEOADD", "places", "2.2944692", "48.8584625", "Paris"]);
+    client.expect_reply(":1\r\n");
+    client.send(&["GEOADD", "places", "11.5030378", "48.1642721", "Paris"]);
+    client.expect_reply(":0\r\n");
+
+    client.send(&["ZCARD", "places"]);
+    client.expect_reply(":1\r\n");
+}
+
+#[test]
+fn keeps_nothing_when_one_of_the_locations_will_not_read() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&[
+        "GEOADD", "places", "11.5", "48.1", "Munich", "181", "0.3", "nowhere",
+    ]);
+    client.read_line();
+
+    // The good location beside the bad one went nowhere either.
+    client.send(&["ZCARD", "places"]);
+    client.expect_reply(":0\r\n");
+}
+
+#[test]
+fn refuses_to_keep_a_location_under_a_key_holding_something_else() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "places", "a string"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["GEOADD", "places", "2.2944692", "48.8584625", "Paris"]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
+#[test]
+fn calls_what_it_made_a_sorted_set() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["GEOADD", "places", "2.2944692", "48.8584625", "Paris"]);
+    client.read_reply();
+
+    client.send(&["TYPE", "places"]);
+    client.expect_reply("+zset\r\n");
+}
+
+#[test]
 fn refuses_a_location_naming_no_place_on_the_earth() {
     let server = Server::start();
     let mut client = server.connect();
@@ -55,13 +146,13 @@ fn takes_a_location_on_the_very_edge_of_the_world() {
     let mut client = server.connect();
 
     // Both limits are the last place that counts, not the first that does not.
-    for (longitude, latitude) in [
-        ("-180", "-85.05112878"),
-        ("180", "85.05112878"),
-        ("-180", "85.05112878"),
-        ("180", "-85.05112878"),
+    for (longitude, latitude, corner) in [
+        ("-180", "-85.05112878", "south-west"),
+        ("180", "85.05112878", "north-east"),
+        ("-180", "85.05112878", "north-west"),
+        ("180", "-85.05112878", "south-east"),
     ] {
-        client.send(&["GEOADD", "places", longitude, latitude, "edge"]);
+        client.send(&["GEOADD", "places", longitude, latitude, corner]);
         client.expect_reply(":1\r\n");
     }
 }
@@ -123,8 +214,8 @@ fn accepts_any_casing_of_the_command() {
     let server = Server::start();
     let mut client = server.connect();
 
-    for spelling in ["GEOADD", "geoadd", "GeoAdd"] {
-        client.send(&[spelling, "places", "11.5030378", "48.1642721", "Munich"]);
+    for (spelling, member) in [("GEOADD", "one"), ("geoadd", "two"), ("GeoAdd", "three")] {
+        client.send(&[spelling, "places", "11.5030378", "48.1642721", member]);
         client.expect_reply(":1\r\n");
     }
 }

@@ -181,7 +181,7 @@ async fn run_against(
     if let Some(reply) = sorted_sets::run(uppercased, args, store) {
         return reply;
     }
-    if let Some(reply) = geo::run(uppercased, args) {
+    if let Some(reply) = geo::run(uppercased, args, store) {
         return reply;
     }
     if let Some(reply) = keys::run(uppercased, args, store) {
@@ -209,7 +209,7 @@ async fn run_against(
 fn changes_the_store(command: &str) -> bool {
     matches!(
         command,
-        "SET" | "INCR" | "RPUSH" | "LPUSH" | "LPOP" | "XADD" | "ZADD" | "ZREM"
+        "SET" | "INCR" | "RPUSH" | "LPUSH" | "LPOP" | "XADD" | "ZADD" | "ZREM" | "GEOADD"
     )
 }
 
