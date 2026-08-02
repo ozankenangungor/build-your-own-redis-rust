@@ -42,6 +42,47 @@ fn keeps_the_location_as_a_member_of_a_sorted_set() {
 }
 
 #[test]
+fn keeps_a_location_under_the_score_redis_keeps_it_under() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for (longitude, latitude, place, score) in [
+        ("2.2944692", "48.8584625", "Paris", "3663832614298053"),
+        ("-0.1277583", "51.5073509", "London", "2163557714754256"),
+        ("100.5252", "13.7220", "Bangkok", "3962257306574459"),
+        ("139.6917", "35.6895", "Tokyo", "4171231230197045"),
+        ("-74.0060", "40.7128", "New York", "1791873974549446"),
+        ("151.2093", "-33.8688", "Sydney", "3252046221964352"),
+    ] {
+        client.send(&["GEOADD", "places", longitude, latitude, place]);
+        client.expect_reply(":1\r\n");
+
+        client.send(&["ZSCORE", "places", place]);
+        client.expect_reply(&format!("${}\r\n{score}\r\n", score.len()));
+    }
+}
+
+#[test]
+fn keeps_the_places_of_the_world_in_the_order_of_their_scores() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for (longitude, latitude, place) in [
+        ("-74.0060", "40.7128", "New York"),
+        ("139.6917", "35.6895", "Tokyo"),
+        ("2.2944692", "48.8584625", "Paris"),
+    ] {
+        client.send(&["GEOADD", "places", longitude, latitude, place]);
+        client.expect_reply(":1\r\n");
+    }
+
+    // Ordered by score now rather than by name, and the score follows the
+    // whereabouts: New York, then Paris, then Tokyo, west to east.
+    client.send(&["ZRANGE", "places", "0", "-1"]);
+    client.expect_reply("*3\r\n$8\r\nNew York\r\n$5\r\nParis\r\n$5\r\nTokyo\r\n");
+}
+
+#[test]
 fn keeps_each_of_the_locations_it_was_given() {
     let server = Server::start();
     let mut client = server.connect();
@@ -61,8 +102,7 @@ fn keeps_each_of_the_locations_it_was_given() {
     client.send(&["ZCARD", "places"]);
     client.expect_reply(":2\r\n");
 
-    // Every place is kept under the same score for now, so what settles their
-    // order is their names.
+    // London lies west of Munich, and the score follows the whereabouts.
     client.send(&["ZRANGE", "places", "0", "-1"]);
     client.expect_reply("*2\r\n$6\r\nLondon\r\n$6\r\nMunich\r\n");
 }

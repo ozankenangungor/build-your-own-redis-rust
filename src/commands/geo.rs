@@ -16,6 +16,10 @@ const LONGITUDES: std::ops::RangeInclusive<f64> = -180.0..=180.0;
 /// on such a square. This is the latitude the square's edge falls at.
 const LATITUDES: std::ops::RangeInclusive<f64> = -85.05112878..=85.05112878;
 
+/// How finely the earth is cut up to give a place its score: this many squares
+/// from side to side, and as many from top to bottom.
+const BITS: u32 = 26;
+
 /// Where a location is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
@@ -72,11 +76,58 @@ fn add(store: &Store, key: &Bytes, located: &[Bytes]) -> Value {
 
 /// The single number a place is kept under.
 ///
-/// Still to be worked out from the two the place was named by. Until it is,
-/// every place is kept under the same one, which is enough to hold a place by
-/// name and no more.
-fn score(_point: Point) -> f64 {
-    0.0
+/// The earth is cut into a grid of `2^26` by `2^26` squares, and the place is
+/// numbered by the square it falls in. The two numbers of that square are then
+/// woven together bit by bit, north-south into the even bits and east-west into
+/// the odd ones, which is what makes one number out of two.
+///
+/// Woven this way, places that are near one another come out with scores near
+/// one another, so a sorted set holding them is already sorted by whereabouts.
+/// That is the whole reason Redis keeps places in a sorted set at all.
+///
+/// A place anywhere inside the grid comes to 52 bits, woven from two of 26,
+/// against the 53 a double counts exactly, so the score comes back out of a
+/// sorted set as it went in.
+///
+/// A place on the very edge is the one exception: the last square along counts
+/// as one past the end, and the score runs a bit wider than a double is sure
+/// of. Redis works the number out the same way and keeps it in a double too, so
+/// it stands where Redis stands.
+fn score(point: Point) -> f64 {
+    let north = squares_along(point.latitude, &LATITUDES);
+    let east = squares_along(point.longitude, &LONGITUDES);
+
+    (spread(north) | (spread(east) << 1)) as f64
+}
+
+/// How many squares along its range a coordinate falls, counting from the low
+/// end. The grid is `2^26` squares wide either way.
+fn squares_along(coordinate: f64, range: &std::ops::RangeInclusive<f64>) -> u32 {
+    let along = (coordinate - range.start()) / (range.end() - range.start());
+
+    (along * f64::from(1u32 << BITS)) as u32
+}
+
+/// Spreads the bits of a number out, a gap left after each, so that two numbers
+/// spread this way slot into one another without meeting.
+///
+/// Done by halves: the number is split in two and moved apart, then each half
+/// is split and moved apart again, five times over, until every bit stands
+/// alone.
+fn spread(value: u32) -> u64 {
+    let mut spread = u64::from(value);
+
+    for (shift, keep) in [
+        (16, 0x0000FFFF0000FFFF),
+        (8, 0x00FF00FF00FF00FF),
+        (4, 0x0F0F0F0F0F0F0F0F),
+        (2, 0x3333333333333333),
+        (1, 0x5555555555555555),
+    ] {
+        spread = (spread | (spread << shift)) & keep;
+    }
+
+    spread
 }
 
 /// Reads a place on the earth from the two numbers that name it.
@@ -168,6 +219,75 @@ mod tests {
         ];
 
         assert_eq!(geoadd(&command), Value::Integer(2));
+    }
+
+    fn scored(longitude: f64, latitude: f64) -> f64 {
+        score(Point {
+            longitude,
+            latitude,
+        })
+    }
+
+    #[test]
+    fn scores_a_place_the_way_redis_scores_it() {
+        // Paris, and the number this stage says it comes to.
+        assert_eq!(scored(2.2944692, 48.8584625), 3663832614298053.0);
+        assert_eq!(scored(-0.1277583, 51.5073509), 2163557714754256.0);
+    }
+
+    #[test]
+    fn scores_the_places_of_the_world() {
+        for (place, longitude, latitude, expected) in [
+            ("Bangkok", 100.5252, 13.7220, 3962257306574459.0),
+            ("Beijing", 116.3972, 39.9075, 4069885364908765.0),
+            ("Berlin", 13.4105, 52.5244, 3673983964876493.0),
+            ("Copenhagen", 12.5655, 55.6759, 3685973395504349.0),
+            ("New Delhi", 77.2167, 28.6667, 3631527070936756.0),
+            ("Kathmandu", 85.3206, 27.7017, 3639507404773204.0),
+            ("London", -0.1278, 51.5074, 2163557714755072.0),
+            ("New York", -74.0060, 40.7128, 1791873974549446.0),
+            ("Paris", 2.3488, 48.8534, 3663832752681684.0),
+            ("Sydney", 151.2093, -33.8688, 3252046221964352.0),
+            ("Tokyo", 139.6917, 35.6895, 4171231230197045.0),
+            ("Vienna", 16.3731, 48.2085, 3673109837763887.0),
+        ] {
+            assert_eq!(scored(longitude, latitude), expected, "{place}");
+        }
+    }
+
+    #[test]
+    fn scores_a_place_at_a_number_a_double_holds_whole() {
+        // Two numbers of 26 bits woven together come to 52, one short of the 53
+        // a double counts exactly, so no score of a place inside the grid is
+        // ever rounded on its way out.
+        for (longitude, latitude) in [
+            (179.9999, 85.0511),
+            (-180.0, -85.05112878),
+            (0.0, 0.0),
+            (2.2944692, 48.8584625),
+        ] {
+            let score = scored(longitude, latitude);
+
+            assert_eq!(score, score.trunc(), "{longitude},{latitude}");
+            assert!(score < 2f64.powi(53), "{longitude},{latitude}");
+        }
+    }
+
+    #[test]
+    fn counts_the_far_edge_of_the_world_as_one_square_past_the_end() {
+        // Redis works the number out this way and keeps it in a double too, so
+        // the one place where the score runs wide is the one place Redis's does.
+        assert_eq!(scored(180.0, 85.05112878), 3.0 * 2f64.powi(52));
+    }
+
+    #[test]
+    fn scores_places_further_east_and_north_the_higher() {
+        // Weaving the two together leaves the order of each of them intact
+        // along its own line, which is what makes a sorted set of places good
+        // for anything.
+        assert!(scored(0.0, 0.0) < scored(1.0, 0.0));
+        assert!(scored(0.0, 0.0) < scored(0.0, 1.0));
+        assert!(scored(-180.0, 0.0) < scored(180.0, 0.0));
     }
 
     #[test]
