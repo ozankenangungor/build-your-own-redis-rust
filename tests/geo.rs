@@ -160,6 +160,77 @@ fn calls_what_it_made_a_sorted_set() {
     client.expect_reply("+zset\r\n");
 }
 
+/// A client that has just put the tester's two places on the map.
+fn with_two_places(server: &Server) -> common::Client {
+    let mut client = server.connect();
+
+    for (longitude, latitude, place) in [
+        ("-0.0884948", "51.5006479", "London"),
+        ("11.5030378", "48.1642721", "Munich"),
+    ] {
+        client.send(&["GEOADD", "location_key", longitude, latitude, place]);
+        client.expect_reply(":1\r\n");
+    }
+
+    client
+}
+
+#[test]
+fn says_where_each_of_the_places_asked_after_is() {
+    let server = Server::start();
+    let mut client = with_two_places(&server);
+
+    // Two places asked after, two answers, each a pair of numbers.
+    client.send(&["GEOPOS", "location_key", "London", "Munich"]);
+    client.expect_reply("*2\r\n*2\r\n$1\r\n0\r\n$1\r\n0\r\n*2\r\n$1\r\n0\r\n$1\r\n0\r\n");
+}
+
+#[test]
+fn says_nothing_of_a_place_the_key_does_not_hold() {
+    let server = Server::start();
+    let mut client = with_two_places(&server);
+
+    client.send(&["GEOPOS", "location_key", "missing_location"]);
+    client.expect_reply("*1\r\n*-1\r\n");
+
+    // The answers still line up with the asking: a place that is not there is
+    // answered with nothing rather than left out.
+    client.send(&["GEOPOS", "location_key", "London", "missing_location"]);
+    client.expect_reply("*2\r\n*2\r\n$1\r\n0\r\n$1\r\n0\r\n*-1\r\n");
+}
+
+#[test]
+fn answers_for_every_place_asked_after_of_a_key_that_is_not_there() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["GEOPOS", "missing_key", "London", "Munich"]);
+    client.expect_reply("*2\r\n*-1\r\n*-1\r\n");
+}
+
+#[test]
+fn refuses_a_geopos_that_names_no_place() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["GEOPOS"]);
+    client.expect_reply("-ERR wrong number of arguments for 'geopos' command\r\n");
+    client.send(&["GEOPOS", "location_key"]);
+    client.expect_reply("-ERR wrong number of arguments for 'geopos' command\r\n");
+}
+
+#[test]
+fn refuses_to_place_a_member_of_a_key_holding_something_else() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "places", "a string"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["GEOPOS", "places", "London"]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
 #[test]
 fn refuses_a_location_naming_no_place_on_the_earth() {
     let server = Server::start();

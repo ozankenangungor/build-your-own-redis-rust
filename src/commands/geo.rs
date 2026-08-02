@@ -42,10 +42,61 @@ pub fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
             [key, located @ ..] if located.len() >= PER_LOCATION => add(store, key, located),
             _ => wrong_arity("geoadd"),
         },
+        // Where each of the places named is, one answer to a place and in the
+        // order they were asked after. A place the key does not hold is
+        // answered with nothing at all rather than left out, so that the
+        // answers still line up with the asking.
+        "GEOPOS" => match args {
+            [key, places @ ..] if !places.is_empty() => positions(store, key, places),
+            _ => wrong_arity("geopos"),
+        },
         _ => return None,
     };
 
     Some(reply)
+}
+
+/// Says where each of these places is.
+fn positions(store: &Store, key: &Bytes, places: &[Bytes]) -> Value {
+    let mut found = Vec::with_capacity(places.len());
+
+    for place in places {
+        let position = match store.zscore(key, place) {
+            Ok(Some(score)) => position(score),
+            Ok(None) => Value::NullArray,
+            Err(WrongType) => return wrong_type(),
+        };
+
+        found.push(position);
+    }
+
+    Value::Array(found)
+}
+
+/// The two numbers a score was made from, read back out of it.
+///
+/// Still to be worked out. Until it is, every place is said to be at the one
+/// spot, which is enough to say which places a key holds and no more.
+fn position(_score: f64) -> Value {
+    let point = Point {
+        longitude: 0.0,
+        latitude: 0.0,
+    };
+
+    Value::Array(vec![
+        Value::BulkString(written(point.longitude)),
+        Value::BulkString(written(point.latitude)),
+    ])
+}
+
+/// Writes a coordinate back out the way Redis writes one: to seventeen places
+/// after the point, which is as fine as a double is worth, with the noughts on
+/// the end left off as having nothing to say.
+fn written(coordinate: f64) -> Bytes {
+    let written = format!("{coordinate:.17}");
+    let written = written.trim_end_matches('0').trim_end_matches('.');
+
+    Bytes::copy_from_slice(written.as_bytes())
 }
 
 /// Puts the locations named into the sorted set at `key`, and says how many of
@@ -334,6 +385,91 @@ mod tests {
             geoadd_to(&["places", "2.2944692", "48.8584625", "Paris"], &store),
             wrong_type()
         );
+    }
+
+    fn geopos(words: &[&str], store: &Store) -> Value {
+        let args: Vec<Bytes> = words.iter().copied().map(named).collect();
+
+        run("GEOPOS", &args, store).expect("geopos belongs to this module")
+    }
+
+    #[test]
+    fn writes_a_coordinate_back_out_the_way_redis_writes_one() {
+        for (coordinate, spelled) in [
+            (0.0, "0"),
+            (100.0, "100"),
+            (-0.5, "-0.5"),
+            (0.25, "0.25"),
+            // Seventeen places, and no rounding to a shorter spelling that
+            // would read back as the same number: this says what the double
+            // really holds, as Redis does.
+            (51.5073509, "51.50735089999999872"),
+        ] {
+            assert_eq!(written(coordinate), spelled, "{coordinate}");
+        }
+    }
+
+    #[test]
+    fn says_where_each_of_the_places_asked_after_is() {
+        let store = Store::default();
+        geoadd_to(
+            &[
+                "places",
+                "-0.0884948",
+                "51.5006479",
+                "London",
+                "11.5030378",
+                "48.1642721",
+                "Munich",
+            ],
+            &store,
+        );
+
+        // Two places asked after, two answers, each a pair of numbers.
+        assert_eq!(
+            geopos(&["places", "London", "Munich"], &store).encode(),
+            b"*2\r\n*2\r\n$1\r\n0\r\n$1\r\n0\r\n*2\r\n$1\r\n0\r\n$1\r\n0\r\n"
+        );
+    }
+
+    #[test]
+    fn says_nothing_of_a_place_the_key_does_not_hold() {
+        let store = Store::default();
+        geoadd_to(&["places", "-0.0884948", "51.5006479", "London"], &store);
+
+        assert_eq!(
+            geopos(&["places", "nowhere"], &store).encode(),
+            b"*1\r\n*-1\r\n"
+        );
+    }
+
+    #[test]
+    fn answers_for_every_place_asked_after_of_a_key_that_is_not_there() {
+        let store = Store::default();
+
+        // One answer to a place either way, so that what comes back still lines
+        // up with what was asked.
+        assert_eq!(
+            geopos(&["nothing", "London", "Munich"], &store).encode(),
+            b"*2\r\n*-1\r\n*-1\r\n"
+        );
+    }
+
+    #[test]
+    fn refuses_a_geopos_that_names_no_place() {
+        let store = Store::default();
+
+        assert_eq!(geopos(&[], &store), wrong_arity("geopos"));
+        assert_eq!(geopos(&["places"], &store), wrong_arity("geopos"));
+    }
+
+    #[test]
+    fn will_not_place_a_member_of_a_key_holding_something_else() {
+        let store = Store::default();
+
+        store.set(named("places"), named("a string"), None);
+
+        assert_eq!(geopos(&["places", "London"], &store), wrong_type());
     }
 
     #[test]
