@@ -178,11 +178,78 @@ fn with_two_places(server: &Server) -> common::Client {
 #[test]
 fn says_where_each_of_the_places_asked_after_is() {
     let server = Server::start();
-    let mut client = with_two_places(&server);
+    let mut client = server.connect();
 
-    // Two places asked after, two answers, each a pair of numbers.
-    client.send(&["GEOPOS", "location_key", "London", "Munich"]);
-    client.expect_reply("*2\r\n*2\r\n$1\r\n0\r\n$1\r\n0\r\n*2\r\n$1\r\n0\r\n$1\r\n0\r\n");
+    // The scores the tester puts in, and where they lie.
+    for (score, place) in [
+        ("3663832614298053", "Foo"),
+        ("3876464048901851", "Bar"),
+        ("3468915414364476", "Baz"),
+        ("3781709020344510", "Caz"),
+    ] {
+        client.send(&["ZADD", "location_key", score, place]);
+        client.expect_reply(":1\r\n");
+    }
+
+    for (place, longitude, latitude) in [
+        ("Foo", 2.294471561908722, 48.85846255040141),
+        ("Bar", 49.12499874830245, 72.99100027813946),
+        ("Baz", 10.08720070123672, 34.50260034107078),
+        ("Caz", 41.12499922513961, 73.99100100464303),
+    ] {
+        client.send(&["GEOPOS", "location_key", place]);
+        let found = client.read_reply();
+
+        assert_near(&found, longitude, latitude, AS_REDIS_DOES, place);
+    }
+}
+
+/// How close a decoded place has to be to the one Redis decodes from the same
+/// score: six places after the point, which is what the tester allows.
+const AS_REDIS_DOES: f64 = 0.000001;
+
+/// How close a place read back has to be to where it went in. Working a place
+/// into a score and back loses a little of it: what comes back is the middle of
+/// the square the place fell in, so it is the same place only to within the
+/// width of one square.
+const WITHIN_A_SQUARE: f64 = 360.0 / 67108864.0;
+
+/// Asserts that a `GEOPOS` answer names a place within `close_enough` of this
+/// one, either way.
+fn assert_near(found: &str, longitude: f64, latitude: f64, close_enough: f64, place: &str) {
+    let numbers: Vec<f64> = found
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect();
+
+    let [read_longitude, read_latitude] = numbers.as_slice() else {
+        panic!("{place}: expected two numbers in {found:?}");
+    };
+
+    for (read, expected, which) in [
+        (read_longitude, longitude, "longitude"),
+        (read_latitude, latitude, "latitude"),
+    ] {
+        assert!(
+            (read - expected).abs() < close_enough,
+            "{place}: {which} {read} is not {expected}"
+        );
+    }
+}
+
+#[test]
+fn says_a_place_is_where_it_was_put() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["GEOADD", "location_key", "2.2944692", "48.8584625", "Paris"]);
+    client.expect_reply(":1\r\n");
+
+    client.send(&["GEOPOS", "location_key", "Paris"]);
+    let found = client.read_reply();
+
+    // Near enough to where it went in that no map would tell them apart.
+    assert_near(&found, 2.2944692, 48.8584625, WITHIN_A_SQUARE, "Paris");
 }
 
 #[test]
@@ -196,7 +263,10 @@ fn says_nothing_of_a_place_the_key_does_not_hold() {
     // The answers still line up with the asking: a place that is not there is
     // answered with nothing rather than left out.
     client.send(&["GEOPOS", "location_key", "London", "missing_location"]);
-    client.expect_reply("*2\r\n*2\r\n$1\r\n0\r\n$1\r\n0\r\n*-1\r\n");
+    let found = client.read_reply();
+
+    assert!(found.starts_with("*2\r\n*2\r\n"), "{found:?}");
+    assert!(found.ends_with("*-1\r\n"), "{found:?}");
 }
 
 #[test]

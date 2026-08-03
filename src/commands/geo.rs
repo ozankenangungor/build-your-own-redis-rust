@@ -74,19 +74,60 @@ fn positions(store: &Store, key: &Bytes, places: &[Bytes]) -> Value {
 }
 
 /// The two numbers a score was made from, read back out of it.
-///
-/// Still to be worked out. Until it is, every place is said to be at the one
-/// spot, which is enough to say which places a key holds and no more.
-fn position(_score: f64) -> Value {
-    let point = Point {
-        longitude: 0.0,
-        latitude: 0.0,
-    };
+fn position(score: f64) -> Value {
+    let point = decode(score);
 
     Value::Array(vec![
         Value::BulkString(written(point.longitude)),
         Value::BulkString(written(point.latitude)),
     ])
+}
+
+/// Unpicks a score into the place it was made from.
+///
+/// The weaving is undone to find the square the place fell in, and the middle
+/// of that square is given back. It is not quite where the place was: a square
+/// stands for everything inside it, so what comes out is the same place to
+/// within the width of one square and no closer. Redis loses the difference the
+/// same way.
+fn decode(score: f64) -> Point {
+    let score = score as u64;
+    let north = gather(score);
+    let east = gather(score >> 1);
+
+    Point {
+        longitude: middle_of(east, &LONGITUDES),
+        latitude: middle_of(north, &LATITUDES),
+    }
+}
+
+/// The middle of the `square`th square along a range cut into `2^26` of them.
+fn middle_of(square: u32, range: &std::ops::RangeInclusive<f64>) -> f64 {
+    let span = range.end() - range.start();
+    let squares = f64::from(1u32 << BITS);
+
+    let low = range.start() + span * (f64::from(square) / squares);
+    let high = range.start() + span * (f64::from(square + 1) / squares);
+
+    (low + high) / 2.0
+}
+
+/// Gathers up every other bit of a number, closing the gaps that [`spread`]
+/// opened. What comes back is one of the two numbers that were woven together.
+fn gather(woven: u64) -> u32 {
+    let mut gathered = woven & 0x5555555555555555;
+
+    for (shift, keep) in [
+        (1, 0x3333333333333333),
+        (2, 0x0F0F0F0F0F0F0F0F),
+        (4, 0x00FF00FF00FF00FF),
+        (8, 0x0000FFFF0000FFFF),
+        (16, 0x00000000FFFFFFFF),
+    ] {
+        gathered = (gathered | (gathered >> shift)) & keep;
+    }
+
+    gathered as u32
 }
 
 /// Writes a coordinate back out the way Redis writes one: to seventeen places
@@ -409,6 +450,89 @@ mod tests {
         }
     }
 
+    /// How close a place read back out of a score has to be to where it went
+    /// in: within the width of one square. The middle of the square is what
+    /// comes back, and the place was somewhere inside it — on the very edge of
+    /// it, if the place fell on a boundary.
+    fn within_a_square(range: &std::ops::RangeInclusive<f64>) -> f64 {
+        (range.end() - range.start()) / f64::from(1u32 << BITS)
+    }
+
+    /// How close a place read back has to be to the numbers worked out for it
+    /// elsewhere. These are the same arithmetic, so nothing but the last few
+    /// figures should differ.
+    const CLOSE_ENOUGH: f64 = 0.000001;
+
+    #[test]
+    fn reads_a_place_back_out_of_its_score() {
+        for (score, longitude, latitude) in [
+            (3663832614298053.0, 2.29447156190872, 48.85846255040141),
+            (3876464048901851.0, 49.12499874830245, 72.99100027813946),
+            (3468915414364476.0, 10.08720070123672, 34.50260034107078),
+            (3781709020344510.0, 41.12499922513961, 73.99100100464303),
+        ] {
+            let point = decode(score);
+
+            assert!(
+                (point.longitude - longitude).abs() < CLOSE_ENOUGH,
+                "{score}: {} is not {longitude}",
+                point.longitude
+            );
+            assert!(
+                (point.latitude - latitude).abs() < CLOSE_ENOUGH,
+                "{score}: {} is not {latitude}",
+                point.latitude
+            );
+        }
+    }
+
+    #[test]
+    fn reads_a_place_back_out_to_where_it_went_in() {
+        for (longitude, latitude) in [
+            (2.2944692, 48.8584625),
+            (-0.1277583, 51.5073509),
+            (139.6917, 35.6895),
+            (-74.0060, 40.7128),
+            (151.2093, -33.8688),
+            (0.0, 0.0),
+            (-180.0, -85.05112878),
+        ] {
+            let point = Point {
+                longitude,
+                latitude,
+            };
+            let read_back = decode(score(point));
+
+            assert!(
+                (read_back.longitude - longitude).abs() <= within_a_square(&LONGITUDES),
+                "{longitude},{latitude}: {} is not {longitude}",
+                read_back.longitude
+            );
+            assert!(
+                (read_back.latitude - latitude).abs() <= within_a_square(&LATITUDES),
+                "{longitude},{latitude}: {} is not {latitude}",
+                read_back.latitude
+            );
+        }
+    }
+
+    #[test]
+    fn gathers_up_what_it_spread_out() {
+        for value in [0, 1, 2, 3, 42, 1 << 25, (1 << 26) - 1, u32::MAX] {
+            assert_eq!(gather(spread(value)), value, "{value}");
+        }
+    }
+
+    #[test]
+    fn gathers_each_of_the_two_numbers_woven_together() {
+        // Woven north into the even bits and east into the odd, so each comes
+        // back out without a trace of the other.
+        let woven = spread(12345) | (spread(54321) << 1);
+
+        assert_eq!(gather(woven), 12345);
+        assert_eq!(gather(woven >> 1), 54321);
+    }
+
     #[test]
     fn says_where_each_of_the_places_asked_after_is() {
         let store = Store::default();
@@ -426,9 +550,31 @@ mod tests {
         );
 
         // Two places asked after, two answers, each a pair of numbers.
+        let Value::Array(answers) = geopos(&["places", "London", "Munich"], &store) else {
+            panic!("one answer to a place");
+        };
+
+        assert_eq!(answers.len(), 2);
+        for answer in &answers {
+            let Value::Array(pair) = answer else {
+                panic!("a place is answered with the two numbers it lies at");
+            };
+
+            assert_eq!(pair.len(), 2);
+        }
+    }
+
+    #[test]
+    fn says_a_place_is_where_it_was_put() {
+        let store = Store::default();
+        geoadd_to(&["places", "2.2944692", "48.8584625", "Paris"], &store);
+
+        // What comes back is the middle of the square the place fell in, near
+        // enough to where it went in that a client could not tell them apart on
+        // any map.
         assert_eq!(
-            geopos(&["places", "London", "Munich"], &store).encode(),
-            b"*2\r\n*2\r\n$1\r\n0\r\n$1\r\n0\r\n*2\r\n$1\r\n0\r\n$1\r\n0\r\n"
+            geopos(&["places", "Paris"], &store).encode(),
+            b"*1\r\n*2\r\n$19\r\n2.29447156190872192\r\n$20\r\n48.85846255040141273\r\n"
         );
     }
 
