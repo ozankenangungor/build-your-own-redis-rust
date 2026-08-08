@@ -253,6 +253,72 @@ fn says_a_place_is_where_it_was_put() {
 }
 
 #[test]
+fn says_how_far_apart_two_places_are() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for (longitude, latitude, place) in [
+        ("11.5030378", "48.164271", "Munich"),
+        ("2.2944692", "48.8584625", "Paris"),
+    ] {
+        client.send(&["GEOADD", "places", longitude, latitude, place]);
+        client.expect_reply(":1\r\n");
+    }
+
+    client.send(&["GEODIST", "places", "Munich", "Paris"]);
+    client.expect_reply("$11\r\n682477.7582\r\n");
+
+    // The same distance whichever way round it is asked, and none at all from
+    // a place to itself.
+    client.send(&["GEODIST", "places", "Paris", "Munich"]);
+    client.expect_reply("$11\r\n682477.7582\r\n");
+    client.send(&["GEODIST", "places", "Munich", "Munich"]);
+    client.expect_reply("$6\r\n0.0000\r\n");
+}
+
+#[test]
+fn measures_in_the_unit_it_was_asked_for() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    for (longitude, latitude, place) in [
+        ("11.5030378", "48.164271", "Munich"),
+        ("2.2944692", "48.8584625", "Paris"),
+    ] {
+        client.send(&["GEOADD", "places", longitude, latitude, place]);
+        client.expect_reply(":1\r\n");
+    }
+
+    for (unit, expected) in [("m", "682477.7582"), ("km", "682.4778")] {
+        client.send(&["GEODIST", "places", "Munich", "Paris", unit]);
+        client.expect_reply(&format!("${}\r\n{expected}\r\n", expected.len()));
+    }
+}
+
+#[test]
+fn says_nothing_of_the_distance_to_a_place_that_is_not_there() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["GEOADD", "places", "11.5030378", "48.164271", "Munich"]);
+    client.expect_reply(":1\r\n");
+
+    client.send(&["GEODIST", "places", "Munich", "nowhere"]);
+    client.expect_reply("$-1\r\n");
+    client.send(&["GEODIST", "missing_key", "Munich", "Paris"]);
+    client.expect_reply("$-1\r\n");
+}
+
+#[test]
+fn refuses_a_geodist_that_names_fewer_than_two_places() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["GEODIST", "places", "Munich"]);
+    client.expect_reply("-ERR wrong number of arguments for 'geodist' command\r\n");
+}
+
+#[test]
 fn says_nothing_of_a_place_the_key_does_not_hold() {
     let server = Server::start();
     let mut client = with_two_places(&server);

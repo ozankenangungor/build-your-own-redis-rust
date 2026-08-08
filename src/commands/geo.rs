@@ -20,6 +20,14 @@ const LATITUDES: std::ops::RangeInclusive<f64> = -85.05112878..=85.05112878;
 /// from side to side, and as many from top to bottom.
 const BITS: u32 = 26;
 
+/// How wide the earth is taken to be, in metres. Redis measures with this one,
+/// so this server measures with it too: a distance is only ever compared with
+/// another worked out the same way.
+const EARTH_RADIUS: f64 = 6_372_797.560_856;
+
+/// The unit a distance is given in unless another is asked for.
+const METRES: f64 = 1.0;
+
 /// Where a location is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
@@ -50,10 +58,66 @@ pub fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
             [key, places @ ..] if !places.is_empty() => positions(store, key, places),
             _ => wrong_arity("geopos"),
         },
+        // How far apart two places are. Either of them being one the key does
+        // not hold leaves nothing to measure between.
+        "GEODIST" => match args {
+            [key, from, to] => distance(store, key, from, to, None),
+            [key, from, to, unit] => distance(store, key, from, to, Some(unit)),
+            _ => wrong_arity("geodist"),
+        },
         _ => return None,
     };
 
     Some(reply)
+}
+
+/// How far apart two of the places a key holds are.
+fn distance(store: &Store, key: &Bytes, from: &Bytes, to: &Bytes, unit: Option<&Bytes>) -> Value {
+    let unit = match unit.map_or(Ok(METRES), measure) {
+        Ok(unit) => unit,
+        Err(error) => return error,
+    };
+
+    let (from, to) = match (store.zscore(key, from), store.zscore(key, to)) {
+        (Ok(Some(from)), Ok(Some(to))) => (decode(from), decode(to)),
+        (Err(WrongType), _) | (_, Err(WrongType)) => return wrong_type(),
+        _ => return Value::Null,
+    };
+
+    // Four places after the point, as Redis answers: a fraction of a millimetre
+    // is further than the whereabouts are known to in the first place.
+    Value::BulkString(Bytes::from(format!("{:.4}", apart(from, to) / unit)))
+}
+
+/// How many metres the unit a distance was asked for is worth.
+fn measure(unit: &Bytes) -> Result<f64, Value> {
+    match text(unit).map(str::to_lowercase).as_deref() {
+        Some("m") => Ok(METRES),
+        Some("km") => Ok(1000.0),
+        Some("mi") => Ok(1609.34),
+        Some("ft") => Ok(0.3048),
+        _ => Err(unsupported_unit()),
+    }
+}
+
+/// How far apart two places on the earth are, in metres, going the shorter way
+/// round it.
+///
+/// Worked out by the haversine formula, which takes the earth for a ball. It is
+/// not one, so the answer is a little out for places far apart; Redis takes the
+/// same shortcut, and off the same size of ball.
+fn apart(from: Point, to: Point) -> f64 {
+    let east = (to.longitude.to_radians() - from.longitude.to_radians()) / 2.0;
+    let north = (to.latitude.to_radians() - from.latitude.to_radians()) / 2.0;
+
+    let (from, to) = (from.latitude.to_radians(), to.latitude.to_radians());
+    let haversine = north.sin().powi(2) + from.cos() * to.cos() * east.sin().powi(2);
+
+    2.0 * EARTH_RADIUS * haversine.sqrt().asin()
+}
+
+fn unsupported_unit() -> Value {
+    Value::Error("ERR unsupported unit provided. please use M, KM, FT, MI".into())
 }
 
 /// Says where each of these places is.
@@ -598,6 +662,141 @@ mod tests {
         assert_eq!(
             geopos(&["nothing", "London", "Munich"], &store).encode(),
             b"*2\r\n*-1\r\n*-1\r\n"
+        );
+    }
+
+    fn geodist(words: &[&str], store: &Store) -> Value {
+        let args: Vec<Bytes> = words.iter().copied().map(named).collect();
+
+        run("GEODIST", &args, store).expect("geodist belongs to this module")
+    }
+
+    /// The two places the tester measures between.
+    fn munich_and_paris(store: &Store) {
+        geoadd_to(
+            &[
+                "places",
+                "11.5030378",
+                "48.164271",
+                "Munich",
+                "2.2944692",
+                "48.8584625",
+                "Paris",
+            ],
+            store,
+        );
+    }
+
+    #[test]
+    fn says_how_far_apart_two_places_are() {
+        let store = Store::default();
+        munich_and_paris(&store);
+
+        assert_eq!(
+            geodist(&["places", "Munich", "Paris"], &store),
+            Value::BulkString(named("682477.7582"))
+        );
+    }
+
+    #[test]
+    fn measures_the_same_distance_whichever_way_round_it_is_asked() {
+        let store = Store::default();
+        munich_and_paris(&store);
+
+        assert_eq!(
+            geodist(&["places", "Paris", "Munich"], &store),
+            geodist(&["places", "Munich", "Paris"], &store)
+        );
+    }
+
+    #[test]
+    fn measures_no_distance_at_all_from_a_place_to_itself() {
+        let store = Store::default();
+        munich_and_paris(&store);
+
+        assert_eq!(
+            geodist(&["places", "Munich", "Munich"], &store),
+            Value::BulkString(named("0.0000"))
+        );
+    }
+
+    #[test]
+    fn measures_in_the_unit_it_was_asked_for() {
+        let store = Store::default();
+        munich_and_paris(&store);
+
+        for (unit, expected) in [
+            ("m", "682477.7582"),
+            ("M", "682477.7582"),
+            ("km", "682.4778"),
+            ("mi", "424.0731"),
+            ("ft", "2239100.2564"),
+        ] {
+            assert_eq!(
+                geodist(&["places", "Munich", "Paris", unit], &store),
+                Value::BulkString(named(expected)),
+                "{unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_unit_it_cannot_measure_in() {
+        let store = Store::default();
+        munich_and_paris(&store);
+
+        assert_eq!(
+            geodist(&["places", "Munich", "Paris", "leagues"], &store),
+            unsupported_unit()
+        );
+    }
+
+    #[test]
+    fn says_nothing_of_the_distance_to_a_place_that_is_not_there() {
+        let store = Store::default();
+        munich_and_paris(&store);
+
+        assert_eq!(
+            geodist(&["places", "Munich", "nowhere"], &store),
+            Value::Null
+        );
+        assert_eq!(
+            geodist(&["places", "nowhere", "Paris"], &store),
+            Value::Null
+        );
+        assert_eq!(
+            geodist(&["nothing", "Munich", "Paris"], &store),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn refuses_a_geodist_that_names_fewer_than_two_places() {
+        let store = Store::default();
+
+        for command in [
+            vec![],
+            vec!["places"],
+            vec!["places", "Munich"],
+            vec!["places", "Munich", "Paris", "km", "extra"],
+        ] {
+            assert_eq!(
+                geodist(&command, &store),
+                wrong_arity("geodist"),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn will_not_measure_between_places_of_a_key_holding_something_else() {
+        let store = Store::default();
+
+        store.set(named("places"), named("a string"), None);
+
+        assert_eq!(
+            geodist(&["places", "Munich", "Paris"], &store),
+            wrong_type()
         );
     }
 
