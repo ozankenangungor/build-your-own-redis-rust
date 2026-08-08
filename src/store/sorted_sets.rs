@@ -166,6 +166,26 @@ impl Store {
         Ok(removed)
     }
 
+    /// Every member of the sorted set at `key`, each with the score that put it
+    /// where it is, in the order the set holds them.
+    pub fn zmembers(&self, key: &Bytes) -> Result<Vec<(Bytes, f64)>, WrongType> {
+        let mut state = self.state();
+        drop_if_expired(&mut state.entries, key);
+
+        match state.entries.get(key) {
+            None => Ok(Vec::new()),
+            Some(Entry {
+                data: Data::SortedSet(set),
+                ..
+            }) => Ok(set
+                .0
+                .iter()
+                .map(|member| (member.name.clone(), member.score))
+                .collect()),
+            Some(_) => Err(WrongType),
+        }
+    }
+
     /// The score the member has in the sorted set at `key`.
     ///
     /// `None` covers both a member the set does not hold and a key holding no

@@ -65,10 +65,88 @@ pub fn run(command: &str, args: &[Bytes], store: &Store) -> Option<Value> {
             [key, from, to, unit] => distance(store, key, from, to, Some(unit)),
             _ => wrong_arity("geodist"),
         },
+        // The places lying within a given way of a given spot.
+        "GEOSEARCH" => match args {
+            [key, terms @ ..] if !terms.is_empty() => search(store, key, terms),
+            _ => wrong_arity("geosearch"),
+        },
         _ => return None,
     };
 
     Some(reply)
+}
+
+/// What a search is looking for: everywhere within `radius` metres of `centre`.
+struct Search {
+    centre: Point,
+    radius: f64,
+}
+
+/// The places a key holds that lie within the search.
+///
+/// Every place is measured against the middle, since a sorted set of places is
+/// sorted by score and a score is not a distance. Redis works the squares of
+/// the grid out to narrow the search first; this walks the lot, which comes to
+/// the same answer for the sets a server this size holds.
+fn search(store: &Store, key: &Bytes, terms: &[Bytes]) -> Value {
+    let search = match search_for(terms) {
+        Ok(search) => search,
+        Err(error) => return error,
+    };
+
+    let places = match store.zmembers(key) {
+        Ok(places) => places,
+        Err(WrongType) => return wrong_type(),
+    };
+
+    let found = places
+        .into_iter()
+        .filter(|(_, score)| apart(search.centre, decode(*score)) <= search.radius)
+        .map(|(place, _)| Value::BulkString(place))
+        .collect();
+
+    Value::Array(found)
+}
+
+/// Reads what a search is looking for out of the words that follow the key.
+///
+/// Only the two ways of searching this server knows are read: from a spot named
+/// outright, and out to a given distance. The words are taken as they come
+/// rather than in a set order, since Redis takes them either way round.
+fn search_for(terms: &[Bytes]) -> Result<Search, Value> {
+    let mut centre = None;
+    let mut radius = None;
+    let mut terms = terms.iter();
+
+    while let Some(term) = terms.next() {
+        match text(term).map(str::to_uppercase).as_deref() {
+            Some("FROMLONLAT") => {
+                let (Some(longitude), Some(latitude)) = (terms.next(), terms.next()) else {
+                    return Err(syntax_error());
+                };
+
+                centre = Some(point(longitude, latitude)?);
+            }
+            Some("BYRADIUS") => {
+                let (Some(distance), Some(unit)) = (terms.next(), terms.next()) else {
+                    return Err(syntax_error());
+                };
+
+                let distance = text(distance)
+                    .and_then(|distance| distance.parse::<f64>().ok())
+                    .filter(|distance| !distance.is_nan())
+                    .ok_or_else(not_a_float)?;
+
+                radius = Some(distance * measure(unit)?);
+            }
+            _ => return Err(syntax_error()),
+        }
+    }
+
+    match (centre, radius) {
+        (Some(centre), Some(radius)) => Ok(Search { centre, radius }),
+        _ => Err(syntax_error()),
+    }
 }
 
 /// How far apart two of the places a key holds are.
@@ -768,6 +846,222 @@ mod tests {
             geodist(&["nothing", "Munich", "Paris"], &store),
             Value::Null
         );
+    }
+
+    fn geosearch(words: &[&str], store: &Store) -> Value {
+        let args: Vec<Bytes> = words.iter().copied().map(named).collect();
+
+        run("GEOSEARCH", &args, store).expect("geosearch belongs to this module")
+    }
+
+    /// The three places the tester searches among.
+    fn three_places(store: &Store) {
+        geoadd_to(
+            &[
+                "places",
+                "11.5030378",
+                "48.164271",
+                "Munich",
+                "2.2944692",
+                "48.8584625",
+                "Paris",
+                "-0.0884948",
+                "51.5006479",
+                "London",
+            ],
+            store,
+        );
+    }
+
+    /// The names a search turned up, in the order they came back.
+    fn names(found: Value) -> Vec<String> {
+        let Value::Array(found) = found else {
+            panic!("a search answers with the places it found");
+        };
+
+        found
+            .iter()
+            .map(|place| match place {
+                Value::BulkString(name) => String::from_utf8_lossy(name).into_owned(),
+                _ => panic!("a place is named"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finds_the_places_within_the_way_it_was_given() {
+        let store = Store::default();
+        three_places(&store);
+
+        let found = geosearch(
+            &["places", "FROMLONLAT", "2", "48", "BYRADIUS", "100000", "m"],
+            &store,
+        );
+
+        assert_eq!(names(found), ["Paris"]);
+    }
+
+    #[test]
+    fn finds_every_place_within_a_wider_way() {
+        let store = Store::default();
+        three_places(&store);
+
+        let found = geosearch(
+            &["places", "FROMLONLAT", "2", "48", "BYRADIUS", "500000", "m"],
+            &store,
+        );
+        let mut found = names(found);
+        found.sort();
+
+        assert_eq!(found, ["London", "Paris"]);
+    }
+
+    #[test]
+    fn finds_the_places_near_another_spot() {
+        let store = Store::default();
+        three_places(&store);
+
+        let found = geosearch(
+            &[
+                "places",
+                "FROMLONLAT",
+                "11",
+                "50",
+                "BYRADIUS",
+                "300000",
+                "m",
+            ],
+            &store,
+        );
+
+        assert_eq!(names(found), ["Munich"]);
+    }
+
+    #[test]
+    fn finds_nothing_where_there_is_nothing_to_find() {
+        let store = Store::default();
+        three_places(&store);
+
+        // The middle of the Pacific, and a key holding nothing at all.
+        let nowhere = ["places", "FROMLONLAT", "-160", "0", "BYRADIUS", "1000", "m"];
+        assert!(names(geosearch(&nowhere, &store)).is_empty());
+
+        let nothing = [
+            "nothing",
+            "FROMLONLAT",
+            "2",
+            "48",
+            "BYRADIUS",
+            "500000",
+            "m",
+        ];
+        assert!(names(geosearch(&nothing, &store)).is_empty());
+    }
+
+    #[test]
+    fn measures_the_way_in_the_unit_it_was_given() {
+        let store = Store::default();
+        three_places(&store);
+
+        // A hundred kilometres is the hundred thousand metres above.
+        let found = geosearch(
+            &["places", "FROMLONLAT", "2", "48", "BYRADIUS", "100", "km"],
+            &store,
+        );
+
+        assert_eq!(names(found), ["Paris"]);
+    }
+
+    #[test]
+    fn takes_the_terms_of_a_search_in_either_order() {
+        let store = Store::default();
+        three_places(&store);
+
+        let found = geosearch(
+            &["places", "BYRADIUS", "100000", "m", "FROMLONLAT", "2", "48"],
+            &store,
+        );
+
+        assert_eq!(names(found), ["Paris"]);
+    }
+
+    #[test]
+    fn refuses_a_search_it_cannot_make_sense_of() {
+        let store = Store::default();
+        three_places(&store);
+
+        for terms in [
+            // Only one of the two terms, or a term half given.
+            vec!["places", "FROMLONLAT", "2", "48"],
+            vec!["places", "BYRADIUS", "100", "m"],
+            vec!["places", "FROMLONLAT", "2", "48", "BYRADIUS", "100"],
+            vec!["places", "FROMLONLAT", "2"],
+            // A way of searching this server does not know.
+            vec!["places", "FROMMEMBER", "Paris", "BYRADIUS", "100", "m"],
+            vec!["places", "FROMLONLAT", "2", "48", "BYBOX", "1", "1", "m"],
+        ] {
+            assert_eq!(geosearch(&terms, &store), syntax_error(), "{terms:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_search_whose_numbers_are_not_numbers() {
+        let store = Store::default();
+        three_places(&store);
+
+        // A term short of one of its numbers swallows the word after it, which
+        // is no number at all.
+        let short = ["places", "FROMLONLAT", "2", "BYRADIUS", "100", "m"];
+        assert_eq!(geosearch(&short, &store), not_a_float());
+
+        let far = ["places", "FROMLONLAT", "2", "48", "BYRADIUS", "far", "m"];
+        assert_eq!(geosearch(&far, &store), not_a_float());
+    }
+
+    #[test]
+    fn refuses_a_search_out_to_a_distance_it_cannot_measure() {
+        let store = Store::default();
+        three_places(&store);
+
+        let terms = [
+            "places",
+            "FROMLONLAT",
+            "2",
+            "48",
+            "BYRADIUS",
+            "100",
+            "leagues",
+        ];
+
+        assert_eq!(geosearch(&terms, &store), unsupported_unit());
+    }
+
+    #[test]
+    fn refuses_a_search_around_a_spot_that_is_nowhere_on_the_earth() {
+        let store = Store::default();
+        three_places(&store);
+
+        let terms = ["places", "FROMLONLAT", "200", "100", "BYRADIUS", "100", "m"];
+
+        assert_eq!(geosearch(&terms, &store), out_of_range(200.0, 100.0));
+    }
+
+    #[test]
+    fn refuses_a_geosearch_that_says_what_to_search_but_not_where() {
+        let store = Store::default();
+
+        assert_eq!(geosearch(&[], &store), wrong_arity("geosearch"));
+        assert_eq!(geosearch(&["places"], &store), wrong_arity("geosearch"));
+    }
+
+    #[test]
+    fn will_not_search_a_key_holding_something_else() {
+        let store = Store::default();
+
+        store.set(named("places"), named("a string"), None);
+
+        let terms = ["places", "FROMLONLAT", "2", "48", "BYRADIUS", "100", "m"];
+        assert_eq!(geosearch(&terms, &store), wrong_type());
     }
 
     #[test]

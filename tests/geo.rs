@@ -295,6 +295,173 @@ fn measures_in_the_unit_it_was_asked_for() {
     }
 }
 
+/// A client that has just put the tester's three places on the map.
+fn with_three_places(server: &Server) -> common::Client {
+    let mut client = server.connect();
+
+    for (longitude, latitude, place) in [
+        ("11.5030378", "48.164271", "Munich"),
+        ("2.2944692", "48.8584625", "Paris"),
+        ("-0.0884948", "51.5006479", "London"),
+    ] {
+        client.send(&["GEOADD", "places", longitude, latitude, place]);
+        client.expect_reply(":1\r\n");
+    }
+
+    client
+}
+
+#[test]
+fn finds_the_places_within_the_way_it_was_given() {
+    let server = Server::start();
+    let mut client = with_three_places(&server);
+
+    client.send(&[
+        "GEOSEARCH",
+        "places",
+        "FROMLONLAT",
+        "2",
+        "48",
+        "BYRADIUS",
+        "100000",
+        "m",
+    ]);
+    client.expect_reply("*1\r\n$5\r\nParis\r\n");
+
+    client.send(&[
+        "GEOSEARCH",
+        "places",
+        "FROMLONLAT",
+        "11",
+        "50",
+        "BYRADIUS",
+        "300000",
+        "m",
+    ]);
+    client.expect_reply("*1\r\n$6\r\nMunich\r\n");
+}
+
+#[test]
+fn finds_every_place_within_a_wider_way() {
+    let server = Server::start();
+    let mut client = with_three_places(&server);
+
+    client.send(&[
+        "GEOSEARCH",
+        "places",
+        "FROMLONLAT",
+        "2",
+        "48",
+        "BYRADIUS",
+        "500000",
+        "m",
+    ]);
+
+    // Either order will do, so the names are gathered up and sorted.
+    let mut found = client.read_command();
+    found.sort();
+
+    assert_eq!(found, ["London", "Paris"]);
+}
+
+#[test]
+fn finds_nothing_where_there_is_nothing_to_find() {
+    let server = Server::start();
+    let mut client = with_three_places(&server);
+
+    // The middle of the Pacific, and a key holding nothing at all.
+    client.send(&[
+        "GEOSEARCH",
+        "places",
+        "FROMLONLAT",
+        "-160",
+        "0",
+        "BYRADIUS",
+        "1000",
+        "m",
+    ]);
+    client.expect_reply("*0\r\n");
+
+    client.send(&[
+        "GEOSEARCH",
+        "missing_key",
+        "FROMLONLAT",
+        "2",
+        "48",
+        "BYRADIUS",
+        "500000",
+        "m",
+    ]);
+    client.expect_reply("*0\r\n");
+}
+
+#[test]
+fn measures_the_way_of_a_search_in_the_unit_it_was_given() {
+    let server = Server::start();
+    let mut client = with_three_places(&server);
+
+    // A hundred kilometres is the hundred thousand metres above.
+    client.send(&[
+        "GEOSEARCH",
+        "places",
+        "FROMLONLAT",
+        "2",
+        "48",
+        "BYRADIUS",
+        "100",
+        "km",
+    ]);
+    client.expect_reply("*1\r\n$5\r\nParis\r\n");
+}
+
+#[test]
+fn refuses_a_search_it_cannot_make_sense_of() {
+    let server = Server::start();
+    let mut client = with_three_places(&server);
+
+    for terms in [
+        ["GEOSEARCH", "places", "FROMLONLAT", "2", "48"].as_slice(),
+        ["GEOSEARCH", "places", "BYRADIUS", "100", "m"].as_slice(),
+        [
+            "GEOSEARCH",
+            "places",
+            "FROMMEMBER",
+            "Paris",
+            "BYRADIUS",
+            "1",
+            "m",
+        ]
+        .as_slice(),
+    ] {
+        client.send(terms);
+        client.expect_reply("-ERR syntax error\r\n");
+    }
+
+    client.send(&["GEOSEARCH", "places"]);
+    client.expect_reply("-ERR wrong number of arguments for 'geosearch' command\r\n");
+}
+
+#[test]
+fn refuses_to_search_a_key_holding_something_else() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["SET", "places", "a string"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&[
+        "GEOSEARCH",
+        "places",
+        "FROMLONLAT",
+        "2",
+        "48",
+        "BYRADIUS",
+        "100",
+        "m",
+    ]);
+    client.expect_reply("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+}
+
 #[test]
 fn says_nothing_of_the_distance_to_a_place_that_is_not_there() {
     let server = Server::start();
