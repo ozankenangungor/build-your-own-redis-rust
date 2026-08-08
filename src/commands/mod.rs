@@ -1,3 +1,4 @@
+mod acl;
 mod geo;
 mod info;
 mod keys;
@@ -185,6 +186,9 @@ async fn run_against(
         return reply;
     }
     if let Some(reply) = keys::run(uppercased, args, store) {
+        return reply;
+    }
+    if let Some(reply) = acl::run(uppercased, args) {
         return reply;
     }
     if let Some(reply) = info::run(uppercased, args, server) {
