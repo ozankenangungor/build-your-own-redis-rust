@@ -46,10 +46,10 @@ fn says_what_it_has_to_say_of_the_user_every_client_is() {
     let server = Server::start();
     let mut client = server.connect();
 
-    // The name of a property, and what this server has to say for it: nothing
-    // yet, since the user is under no rule it could name.
+    // The name of a property, and the one flag this server has to set on it:
+    // the user wants no password, which is why every client is believed.
     client.send(&["ACL", "GETUSER", "default"]);
-    client.expect_reply("*2\r\n$5\r\nflags\r\n*0\r\n");
+    client.expect_reply("*2\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n");
 }
 
 #[test]

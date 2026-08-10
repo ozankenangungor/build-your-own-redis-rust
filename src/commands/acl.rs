@@ -8,6 +8,10 @@ use bytes::Bytes;
 /// before it is believed is another matter, and one still to come.
 const DEFAULT_USER: &str = "default";
 
+/// How Redis flags a user that will let any password through, having none of
+/// its own to check against.
+const NO_PASSWORD: &[u8] = b"nopass";
+
 /// Handles the commands that ask who a client is and what it may do. `None`
 /// means the command belongs to another module.
 pub fn run(command: &str, args: &[Bytes]) -> Option<Value> {
@@ -43,9 +47,9 @@ fn user_named(user: &Bytes) -> Value {
 
     Value::Array(vec![
         Value::BulkString(Bytes::from_static(b"flags")),
-        // Nothing yet is said of what this user may do or must prove, so there
-        // is nothing to flag it with.
-        Value::Array(Vec::new()),
+        // A user with no password set is flagged as wanting none, and this one
+        // has none: it is why every client is believed without being asked.
+        Value::Array(vec![Value::BulkString(Bytes::from_static(NO_PASSWORD))]),
     ])
 }
 
@@ -93,9 +97,10 @@ mod tests {
 
     #[test]
     fn says_what_it_has_to_say_of_the_user_every_client_is() {
+        // One property, and the one flag that says the user wants no password.
         assert_eq!(
             acl(&["GETUSER", "default"]).encode(),
-            b"*2\r\n$5\r\nflags\r\n*0\r\n"
+            b"*2\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n"
         );
     }
 
@@ -111,7 +116,7 @@ mod tests {
         for spelling in ["GETUSER", "getuser", "GetUser"] {
             assert_eq!(
                 acl(&[spelling, "default"]).encode(),
-                b"*2\r\n$5\r\nflags\r\n*0\r\n",
+                b"*2\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n",
                 "{spelling}"
             );
         }
