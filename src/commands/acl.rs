@@ -18,6 +18,10 @@ pub fn run(command: &str, args: &[Bytes]) -> Option<Value> {
                 [] => Value::BulkString(Bytes::from_static(DEFAULT_USER.as_bytes())),
                 _ => unknown_action(action),
             },
+            Some((action, rest)) if action.eq_ignore_ascii_case(b"GETUSER") => match rest {
+                [user] => user_named(user),
+                _ => unknown_action(action),
+            },
             Some((action, _)) => unknown_action(action),
             None => wrong_arity("acl"),
         },
@@ -25,6 +29,24 @@ pub fn run(command: &str, args: &[Bytes]) -> Option<Value> {
     };
 
     Some(reply)
+}
+
+/// Everything this server has to say about a user, as the pairs of a property
+/// and its value that `ACL GETUSER` answers with.
+///
+/// A name this server has never heard of is answered with nothing at all: there
+/// is only the one user, and it was here before the server started.
+fn user_named(user: &Bytes) -> Value {
+    if user != DEFAULT_USER {
+        return Value::NullArray;
+    }
+
+    Value::Array(vec![
+        Value::BulkString(Bytes::from_static(b"flags")),
+        // Nothing yet is said of what this user may do or must prove, so there
+        // is nothing to flag it with.
+        Value::Array(Vec::new()),
+    ])
 }
 
 /// What a client is told when it asks `ACL` something this server has no answer
@@ -67,6 +89,41 @@ mod tests {
                 "{spelling}"
             );
         }
+    }
+
+    #[test]
+    fn says_what_it_has_to_say_of_the_user_every_client_is() {
+        assert_eq!(
+            acl(&["GETUSER", "default"]).encode(),
+            b"*2\r\n$5\r\nflags\r\n*0\r\n"
+        );
+    }
+
+    #[test]
+    fn says_nothing_of_a_user_it_has_never_heard_of() {
+        // There is the one user, and it was here before the server started.
+        assert_eq!(acl(&["GETUSER", "alice"]), Value::NullArray);
+        assert_eq!(acl(&["GETUSER", ""]), Value::NullArray);
+    }
+
+    #[test]
+    fn takes_the_word_before_the_user_however_it_is_spelled() {
+        for spelling in ["GETUSER", "getuser", "GetUser"] {
+            assert_eq!(
+                acl(&[spelling, "default"]).encode(),
+                b"*2\r\n$5\r\nflags\r\n*0\r\n",
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_getuser_that_names_no_user_or_more_than_one() {
+        assert_eq!(acl(&["GETUSER"]), unknown_action(b"GETUSER"));
+        assert_eq!(
+            acl(&["GETUSER", "default", "extra"]),
+            unknown_action(b"GETUSER")
+        );
     }
 
     #[test]

@@ -42,6 +42,37 @@ fn accepts_any_casing_of_the_command_and_the_word_after_it() {
 }
 
 #[test]
+fn says_what_it_has_to_say_of_the_user_every_client_is() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    // The name of a property, and what this server has to say for it: nothing
+    // yet, since the user is under no rule it could name.
+    client.send(&["ACL", "GETUSER", "default"]);
+    client.expect_reply("*2\r\n$5\r\nflags\r\n*0\r\n");
+}
+
+#[test]
+fn says_nothing_of_a_user_it_has_never_heard_of() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ACL", "GETUSER", "alice"]);
+    client.expect_reply("*-1\r\n");
+}
+
+#[test]
+fn refuses_a_getuser_that_names_no_user() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ACL", "GETUSER"]);
+    let said = client.read_line();
+
+    assert!(said.starts_with("-ERR Unknown ACL subcommand"), "{said:?}");
+}
+
+#[test]
 fn refuses_an_acl_that_says_nothing() {
     let server = Server::start();
     let mut client = server.connect();
