@@ -50,6 +50,11 @@ fn user_named(user: &Bytes) -> Value {
         // A user with no password set is flagged as wanting none, and this one
         // has none: it is why every client is believed without being asked.
         Value::Array(vec![Value::BulkString(Bytes::from_static(NO_PASSWORD))]),
+        Value::BulkString(Bytes::from_static(b"passwords")),
+        // The passwords themselves, of which this user has none. Redis lists
+        // them hashed rather than as they were given, so that a client asking
+        // after a user learns nothing it could log in with.
+        Value::Array(Vec::new()),
     ])
 }
 
@@ -97,10 +102,11 @@ mod tests {
 
     #[test]
     fn says_what_it_has_to_say_of_the_user_every_client_is() {
-        // One property, and the one flag that says the user wants no password.
+        // Two properties: the flag that says the user wants no password, and
+        // the passwords it has, of which there are none.
         assert_eq!(
             acl(&["GETUSER", "default"]).encode(),
-            b"*2\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n"
+            b"*4\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n$9\r\npasswords\r\n*0\r\n"
         );
     }
 
@@ -116,7 +122,7 @@ mod tests {
         for spelling in ["GETUSER", "getuser", "GetUser"] {
             assert_eq!(
                 acl(&[spelling, "default"]).encode(),
-                b"*2\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n",
+                b"*4\r\n$5\r\nflags\r\n*1\r\n$6\r\nnopass\r\n$9\r\npasswords\r\n*0\r\n",
                 "{spelling}"
             );
         }
