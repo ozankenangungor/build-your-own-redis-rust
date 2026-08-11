@@ -2,6 +2,7 @@ use crate::aof::Aof;
 use crate::channels::Channels;
 use crate::config::Config;
 use crate::replicas::Replicas;
+use crate::users::Users;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,6 +28,9 @@ pub struct Server {
     /// command read out of the file has no business being written straight back
     /// into it.
     pub aof: OnceLock<Aof>,
+    /// The passwords a client may be let in with. Every connection asks the
+    /// same set, so a password given on one is a password given on all.
+    pub users: Users,
 }
 
 /// A server's place in the history of a dataset.
@@ -63,6 +67,7 @@ impl Server {
             replicas: Replicas::default(),
             channels: Channels::default(),
             aof: OnceLock::new(),
+            users: Users::default(),
         }
     }
 }

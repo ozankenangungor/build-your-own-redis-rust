@@ -188,7 +188,7 @@ async fn run_against(
     if let Some(reply) = keys::run(uppercased, args, store) {
         return reply;
     }
-    if let Some(reply) = acl::run(uppercased, args) {
+    if let Some(reply) = acl::run(uppercased, args, &server.users) {
         return reply;
     }
     if let Some(reply) = info::run(uppercased, args, server) {

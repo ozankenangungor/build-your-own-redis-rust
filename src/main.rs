@@ -10,6 +10,7 @@ mod replicas;
 mod resp;
 mod server;
 mod store;
+mod users;
 
 use anyhow::Result;
 use commands::{Answer, Subscriptions, Transaction};

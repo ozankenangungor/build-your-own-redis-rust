@@ -1,5 +1,6 @@
 use super::wrong_arity;
 use crate::resp::Value;
+use crate::users::Users;
 use bytes::Bytes;
 
 /// The user a connection is taken to be until it says otherwise.
@@ -14,7 +15,7 @@ const NO_PASSWORD: &[u8] = b"nopass";
 
 /// Handles the commands that ask who a client is and what it may do. `None`
 /// means the command belongs to another module.
-pub fn run(command: &str, args: &[Bytes]) -> Option<Value> {
+pub fn run(command: &str, args: &[Bytes], users: &Users) -> Option<Value> {
     let reply = match command {
         // `ACL` covers several commands in one, told apart by the word after it.
         "ACL" => match args.split_first() {
@@ -23,7 +24,11 @@ pub fn run(command: &str, args: &[Bytes]) -> Option<Value> {
                 _ => unknown_action(action),
             },
             Some((action, rest)) if action.eq_ignore_ascii_case(b"GETUSER") => match rest {
-                [user] => user_named(user),
+                [user] => user_named(user, users),
+                _ => unknown_action(action),
+            },
+            Some((action, rest)) if action.eq_ignore_ascii_case(b"SETUSER") => match rest {
+                [user, rules @ ..] if !rules.is_empty() => set_user(user, rules, users),
                 _ => unknown_action(action),
             },
             Some((action, _)) => unknown_action(action),
@@ -40,22 +45,72 @@ pub fn run(command: &str, args: &[Bytes]) -> Option<Value> {
 ///
 /// A name this server has never heard of is answered with nothing at all: there
 /// is only the one user, and it was here before the server started.
-fn user_named(user: &Bytes) -> Value {
+fn user_named(user: &Bytes, users: &Users) -> Value {
     if user != DEFAULT_USER {
         return Value::NullArray;
     }
 
+    // A user with no password of its own is flagged as wanting none, which is
+    // what makes a client believed without being asked. Give it one and the
+    // flag goes: there is now something to check against.
+    let flags = match users.wants_no_password() {
+        true => vec![Value::BulkString(Bytes::from_static(NO_PASSWORD))],
+        false => Vec::new(),
+    };
+
+    // The passwords go back hashed, as they are kept, so that a client asking
+    // after a user learns nothing it could log in with.
+    let passwords = users
+        .hashed_passwords()
+        .into_iter()
+        .map(|hashed| Value::BulkString(Bytes::from(hashed)))
+        .collect();
+
     Value::Array(vec![
         Value::BulkString(Bytes::from_static(b"flags")),
-        // A user with no password set is flagged as wanting none, and this one
-        // has none: it is why every client is believed without being asked.
-        Value::Array(vec![Value::BulkString(Bytes::from_static(NO_PASSWORD))]),
+        Value::Array(flags),
         Value::BulkString(Bytes::from_static(b"passwords")),
-        // The passwords themselves, of which this user has none. Redis lists
-        // them hashed rather than as they were given, so that a client asking
-        // after a user learns nothing it could log in with.
-        Value::Array(Vec::new()),
+        Value::Array(passwords),
     ])
+}
+
+/// Changes a user by the rules it is given.
+///
+/// Every rule is looked over before any is applied, so a command with one it
+/// cannot follow changes nothing at all.
+fn set_user(user: &Bytes, rules: &[Bytes], users: &Users) -> Value {
+    // Redis makes a user it has never heard of; this server has the one it
+    // started with, and says so rather than pretending to make another.
+    if user != DEFAULT_USER {
+        return Value::Error(format!(
+            "ERR this server has only the '{DEFAULT_USER}' user"
+        ));
+    }
+
+    let mut passwords = Vec::with_capacity(rules.len());
+
+    for rule in rules {
+        match rule.split_first() {
+            // `>password` is the one rule this server follows: it gives the
+            // user another password it may be let in with.
+            Some((b'>', password)) if !password.is_empty() => passwords.push(password),
+            _ => return bad_rule(rule),
+        }
+    }
+
+    for password in passwords {
+        users.add_password(password);
+    }
+
+    Value::SimpleString("OK".into())
+}
+
+/// What a client is told of a rule this server cannot follow.
+fn bad_rule(rule: &[u8]) -> Value {
+    Value::Error(format!(
+        "ERR Error in ACL SETUSER modifier '{}': Syntax error",
+        String::from_utf8_lossy(rule)
+    ))
 }
 
 /// What a client is told when it asks `ACL` something this server has no answer
@@ -73,12 +128,16 @@ mod tests {
     use super::*;
 
     fn acl(words: &[&str]) -> Value {
+        acl_of(words, &Users::default())
+    }
+
+    fn acl_of(words: &[&str], users: &Users) -> Value {
         let args: Vec<Bytes> = words
             .iter()
             .map(|word| Bytes::copy_from_slice(word.as_bytes()))
             .collect();
 
-        run("ACL", &args).expect("acl belongs to this module")
+        run("ACL", &args, users).expect("acl belongs to this module")
     }
 
     #[test]
@@ -128,6 +187,95 @@ mod tests {
         }
     }
 
+    /// The hash of the password the stage sets, as Redis keeps it.
+    const MY_PASSWORD: &str = "89e01536ac207279409d4de1e5253e01f4a1769e696db0d6062ca9b8f56767c8";
+
+    #[test]
+    fn takes_a_password_for_the_user_and_says_it_has() {
+        let users = Users::default();
+
+        assert_eq!(
+            acl_of(&["SETUSER", "default", ">mypassword"], &users),
+            Value::SimpleString("OK".into())
+        );
+    }
+
+    #[test]
+    fn lets_the_flag_go_once_the_user_has_a_password_to_check() {
+        let users = Users::default();
+
+        acl_of(&["SETUSER", "default", ">mypassword"], &users);
+
+        assert_eq!(
+            acl_of(&["GETUSER", "default"], &users).encode(),
+            format!("*4\r\n$5\r\nflags\r\n*0\r\n$9\r\npasswords\r\n*1\r\n$64\r\n{MY_PASSWORD}\r\n")
+                .as_bytes()
+        );
+    }
+
+    #[test]
+    fn takes_the_word_before_the_rules_however_it_is_spelled() {
+        for spelling in ["SETUSER", "setuser", "SetUser"] {
+            let users = Users::default();
+
+            acl_of(&[spelling, "default", ">mypassword"], &users);
+
+            assert_eq!(users.hashed_passwords(), [MY_PASSWORD], "{spelling}");
+        }
+    }
+
+    #[test]
+    fn takes_every_password_a_command_gives_the_user() {
+        let users = Users::default();
+
+        acl_of(&["SETUSER", "default", ">first", ">second"], &users);
+
+        assert_eq!(users.hashed_passwords().len(), 2);
+    }
+
+    #[test]
+    fn takes_nothing_at_all_from_a_command_with_a_rule_it_cannot_follow() {
+        let users = Users::default();
+
+        // The rule it could follow is passed over too: a command half carried
+        // out is worse than one refused.
+        assert_eq!(
+            acl_of(&["SETUSER", "default", ">mypassword", "allkeys"], &users),
+            bad_rule(b"allkeys")
+        );
+        assert!(users.wants_no_password());
+    }
+
+    #[test]
+    fn refuses_a_rule_it_cannot_follow() {
+        for rule in ["on", "off", "~*", "+@all", "<mypassword", "nopass", ">", ""] {
+            let users = Users::default();
+
+            assert_eq!(
+                acl_of(&["SETUSER", "default", rule], &users),
+                bad_rule(rule.as_bytes()),
+                "{rule:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_to_make_a_user_it_was_never_started_with() {
+        let users = Users::default();
+        let Value::Error(said) = acl_of(&["SETUSER", "alice", ">mypassword"], &users) else {
+            panic!("a user this server does not have is refused");
+        };
+
+        assert!(said.starts_with("ERR "), "{said:?}");
+        assert!(users.wants_no_password());
+    }
+
+    #[test]
+    fn refuses_a_setuser_that_names_no_user_or_no_rule() {
+        assert_eq!(acl(&["SETUSER"]), unknown_action(b"SETUSER"));
+        assert_eq!(acl(&["SETUSER", "default"]), unknown_action(b"SETUSER"));
+    }
+
     #[test]
     fn refuses_a_getuser_that_names_no_user_or_more_than_one() {
         assert_eq!(acl(&["GETUSER"]), unknown_action(b"GETUSER"));
@@ -150,6 +298,6 @@ mod tests {
 
     #[test]
     fn leaves_alone_the_commands_that_are_not_its_own() {
-        assert!(run("GET", &[]).is_none());
+        assert!(run("GET", &[], &Users::default()).is_none());
     }
 }
