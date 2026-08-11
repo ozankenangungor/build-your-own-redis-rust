@@ -91,6 +91,69 @@ fn keeps_the_password_for_every_client_and_not_the_one_that_set_it() {
 }
 
 #[test]
+fn lets_in_a_client_that_knows_the_password_and_turns_away_one_that_does_not() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ACL", "SETUSER", "default", ">mypassword"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["AUTH", "default", "wrongpassword"]);
+    let said = client.read_line();
+    assert!(said.starts_with("-WRONGPASS"), "{said:?}");
+
+    client.send(&["AUTH", "default", "mypassword"]);
+    client.expect_reply("+OK\r\n");
+}
+
+#[test]
+fn takes_a_password_set_on_another_connection() {
+    let server = Server::start();
+    let mut setting = server.connect();
+
+    setting.send(&["ACL", "SETUSER", "default", ">mypassword"]);
+    setting.expect_reply("+OK\r\n");
+
+    // One user, one set of passwords, whichever connection asks.
+    let mut authenticating = server.connect();
+
+    authenticating.send(&["AUTH", "default", "mypassword"]);
+    authenticating.expect_reply("+OK\r\n");
+}
+
+#[test]
+fn turns_away_a_client_naming_a_user_this_server_does_not_have() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["ACL", "SETUSER", "default", ">mypassword"]);
+    client.expect_reply("+OK\r\n");
+
+    client.send(&["AUTH", "alice", "mypassword"]);
+    let said = client.read_line();
+
+    assert!(said.starts_with("-WRONGPASS"), "{said:?}");
+}
+
+#[test]
+fn lets_anyone_in_while_the_user_wants_no_password() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["AUTH", "default", "anything at all"]);
+    client.expect_reply("+OK\r\n");
+}
+
+#[test]
+fn refuses_an_auth_that_says_nothing() {
+    let server = Server::start();
+    let mut client = server.connect();
+
+    client.send(&["AUTH"]);
+    client.expect_reply("-ERR wrong number of arguments for 'auth' command\r\n");
+}
+
+#[test]
 fn takes_a_password_that_is_not_text() {
     let server = Server::start();
     let mut client = server.connect();

@@ -39,6 +39,17 @@ impl Users {
         self.passwords().is_empty()
     }
 
+    /// Whether this password would let a client in.
+    ///
+    /// A user that wants no password takes any, which is what the flag means.
+    /// Otherwise the password is hashed and the hash looked for among the ones
+    /// the user was given: what was kept was never the password itself.
+    pub fn accepts(&self, password: &[u8]) -> bool {
+        let passwords = self.passwords();
+
+        passwords.is_empty() || passwords.contains(&hashed(password))
+    }
+
     fn passwords(&self) -> MutexGuard<'_, Vec<String>> {
         // A panic elsewhere poisons the lock but leaves the passwords intact,
         // so recover rather than shutting everybody out.

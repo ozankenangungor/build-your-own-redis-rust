@@ -34,10 +34,54 @@ pub fn run(command: &str, args: &[Bytes], users: &Users) -> Option<Value> {
             Some((action, _)) => unknown_action(action),
             None => wrong_arity("acl"),
         },
+        // Whether a client knows a password the user may be let in with. The
+        // connection is not yet held to the answer; that comes later.
+        "AUTH" => match args {
+            [password] => alone(password, users),
+            [user, password] => authenticate(user, password, users),
+            _ => wrong_arity("auth"),
+        },
         _ => return None,
     };
 
     Some(reply)
+}
+
+/// Checks a password against the user a client says it is.
+///
+/// A user this server has never heard of is turned away in the same words as a
+/// password that does not match, so that a client learns nothing from the
+/// asking beyond whether it got in.
+fn authenticate(user: &Bytes, password: &Bytes, users: &Users) -> Value {
+    if user != DEFAULT_USER || !users.accepts(password) {
+        return wrong_password();
+    }
+
+    Value::SimpleString("OK".into())
+}
+
+/// The same, for a client that gave a password and no user.
+///
+/// Redis takes it for the default user, but only when that user has a password
+/// to check: told a password where none was ever set, it says so rather than
+/// letting the client believe it had done something.
+fn alone(password: &Bytes, users: &Users) -> Value {
+    if users.wants_no_password() {
+        return Value::Error(
+            "ERR Client sent AUTH, but no password is set. Did you mean AUTH <username> <password>?"
+                .into(),
+        );
+    }
+
+    authenticate(
+        &Bytes::from_static(DEFAULT_USER.as_bytes()),
+        password,
+        users,
+    )
+}
+
+fn wrong_password() -> Value {
+    Value::Error("WRONGPASS invalid username-password pair or user is disabled.".into())
 }
 
 /// Everything this server has to say about a user, as the pairs of a property
@@ -268,6 +312,103 @@ mod tests {
 
         assert!(said.starts_with("ERR "), "{said:?}");
         assert!(users.wants_no_password());
+    }
+
+    fn auth(words: &[&str], users: &Users) -> Value {
+        let args: Vec<Bytes> = words
+            .iter()
+            .map(|word| Bytes::copy_from_slice(word.as_bytes()))
+            .collect();
+
+        run("AUTH", &args, users).expect("auth belongs to this module")
+    }
+
+    #[test]
+    fn lets_in_a_client_that_knows_the_password() {
+        let users = Users::default();
+        acl_of(&["SETUSER", "default", ">mypassword"], &users);
+
+        assert_eq!(
+            auth(&["default", "mypassword"], &users),
+            Value::SimpleString("OK".into())
+        );
+    }
+
+    #[test]
+    fn turns_away_a_client_that_does_not() {
+        let users = Users::default();
+        acl_of(&["SETUSER", "default", ">mypassword"], &users);
+
+        assert_eq!(
+            auth(&["default", "wrongpassword"], &users),
+            wrong_password()
+        );
+        assert_eq!(auth(&["default", ""], &users), wrong_password());
+        assert_eq!(auth(&["default", "MYPASSWORD"], &users), wrong_password());
+    }
+
+    #[test]
+    fn lets_in_a_client_that_knows_any_of_the_passwords() {
+        let users = Users::default();
+        acl_of(&["SETUSER", "default", ">first", ">second"], &users);
+
+        for password in ["first", "second"] {
+            assert_eq!(
+                auth(&["default", password], &users),
+                Value::SimpleString("OK".into()),
+                "{password}"
+            );
+        }
+    }
+
+    #[test]
+    fn turns_away_a_client_naming_a_user_this_server_does_not_have() {
+        let users = Users::default();
+        acl_of(&["SETUSER", "default", ">mypassword"], &users);
+
+        // Said in the same words as a wrong password, so that a client learns
+        // nothing from the asking beyond whether it got in.
+        assert_eq!(auth(&["alice", "mypassword"], &users), wrong_password());
+    }
+
+    #[test]
+    fn lets_anyone_in_while_the_user_wants_no_password() {
+        let users = Users::default();
+
+        assert_eq!(
+            auth(&["default", "anything at all"], &users),
+            Value::SimpleString("OK".into())
+        );
+    }
+
+    #[test]
+    fn takes_a_password_given_without_a_user() {
+        let users = Users::default();
+        acl_of(&["SETUSER", "default", ">mypassword"], &users);
+
+        assert_eq!(
+            auth(&["mypassword"], &users),
+            Value::SimpleString("OK".into())
+        );
+        assert_eq!(auth(&["wrongpassword"], &users), wrong_password());
+    }
+
+    #[test]
+    fn says_so_when_a_password_is_given_where_none_was_ever_set() {
+        let users = Users::default();
+        let Value::Error(said) = auth(&["mypassword"], &users) else {
+            panic!("a password where none was set is refused");
+        };
+
+        assert!(said.starts_with("ERR Client sent AUTH"), "{said:?}");
+    }
+
+    #[test]
+    fn refuses_an_auth_that_says_nothing() {
+        let users = Users::default();
+
+        assert_eq!(auth(&[], &users), wrong_arity("auth"));
+        assert_eq!(auth(&["default", "a", "b"], &users), wrong_arity("auth"));
     }
 
     #[test]
