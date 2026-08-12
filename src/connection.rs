@@ -1,4 +1,4 @@
-use crate::commands::{Answer, Subscriptions, Transaction};
+use crate::commands::{Answer, Identity, Subscriptions, Transaction};
 use crate::replicas::Following;
 use crate::resp::Value;
 use crate::server::Server;
@@ -24,6 +24,9 @@ pub async fn serve(
     // The same goes for the channels this client listens on: they are the
     // client's, not the server's, and go when it does.
     let (mut subscriptions, mut messages) = Subscriptions::of(server.channels.clone());
+    // Whether this client has been let in is settled as it arrives: a password
+    // set afterwards is no reason to turn away a client already inside.
+    let mut identity = Identity::new(&server.users);
 
     loop {
         // A client that is listening has two things to wait on at once: what it
@@ -55,6 +58,7 @@ pub async fn serve(
                         &store,
                         &mut transaction,
                         &mut subscriptions,
+                        &mut identity,
                         server,
                     )
                     .await

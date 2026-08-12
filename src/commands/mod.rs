@@ -11,6 +11,7 @@ mod streams;
 mod strings;
 mod transactions;
 
+pub use acl::Identity;
 pub use pubsub::Subscriptions;
 pub use transactions::Transaction;
 
@@ -44,12 +45,20 @@ pub async fn run(
     store: &Store,
     transaction: &mut Transaction,
     subscriptions: &mut Subscriptions,
+    identity: &mut Identity,
     server: &Server,
 ) -> Answer {
     let command = match Command::parse(command) {
         Ok(command) => command,
         Err(reply) => return Answer::Reply(reply),
     };
+
+    // A client the server has not been told who it is does nothing on the
+    // server's behalf, save what it needs to say who it is. This comes first of
+    // all: everything below is work, and work is what is being withheld.
+    if !identity.is_authenticated() && !acl::allowed_while_out(&command.uppercased) {
+        return Answer::Reply(acl::needs_authenticating());
+    }
 
     // A client listening on a channel is in a conversation of another kind, and
     // only the commands that steer that conversation are open to it. This comes
@@ -71,9 +80,19 @@ pub async fn run(
     let reply = match transactions::steer(&command, transaction, store) {
         Some(Outcome::Reply(reply)) => reply,
         Some(Outcome::Execute(queued)) => {
-            execute(queued, store, transaction, subscriptions, server).await
+            execute(queued, store, transaction, subscriptions, identity, server).await
         }
-        None => dispatch(&command, store, transaction, subscriptions, server).await,
+        None => {
+            dispatch(
+                &command,
+                store,
+                transaction,
+                subscriptions,
+                identity,
+                server,
+            )
+            .await
+        }
     };
 
     // A replica that has been handed the dataset is no longer a client. What
@@ -97,12 +116,13 @@ async fn execute(
     store: &Store,
     transaction: &mut Transaction,
     subscriptions: &mut Subscriptions,
+    identity: &mut Identity,
     server: &Server,
 ) -> Value {
     let mut replies = Vec::with_capacity(queued.len());
 
     for command in &queued {
-        replies.push(dispatch(command, store, transaction, subscriptions, server).await);
+        replies.push(dispatch(command, store, transaction, subscriptions, identity, server).await);
     }
 
     Value::Array(replies)
@@ -117,9 +137,10 @@ async fn dispatch(
     store: &Store,
     transaction: &mut Transaction,
     subscriptions: &mut Subscriptions,
+    identity: &mut Identity,
     server: &Server,
 ) -> Value {
-    let reply = run_against(command, store, transaction, subscriptions, server).await;
+    let reply = run_against(command, store, transaction, subscriptions, identity, server).await;
 
     // A command that changed nothing is nothing to pass on or write down, and
     // one that failed changed nothing.
@@ -154,6 +175,7 @@ async fn run_against(
     store: &Store,
     transaction: &mut Transaction,
     subscriptions: &mut Subscriptions,
+    identity: &mut Identity,
     server: &Server,
 ) -> Value {
     let Command {
@@ -188,7 +210,7 @@ async fn run_against(
     if let Some(reply) = keys::run(uppercased, args, store) {
         return reply;
     }
-    if let Some(reply) = acl::run(uppercased, args, &server.users) {
+    if let Some(reply) = acl::run(uppercased, args, &server.users, identity) {
         return reply;
     }
     if let Some(reply) = info::run(uppercased, args, server) {

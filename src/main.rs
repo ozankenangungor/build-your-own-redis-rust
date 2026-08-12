@@ -13,7 +13,7 @@ mod store;
 mod users;
 
 use anyhow::Result;
-use commands::{Answer, Subscriptions, Transaction};
+use commands::{Answer, Identity, Subscriptions, Transaction};
 use config::Config;
 use resp::Value;
 use server::Server;
@@ -36,10 +36,20 @@ async fn replay(recorded: Vec<Value>, store: &Store, server: &Server) -> usize {
     // the commands it ran rather than as itself.
     let mut transaction = Transaction::default();
     let mut subscriptions = Subscriptions::default();
+    let mut identity = Identity::trusted();
     let mut replayed = 0;
 
     for command in recorded {
-        match commands::run(command, store, &mut transaction, &mut subscriptions, server).await {
+        match commands::run(
+            command,
+            store,
+            &mut transaction,
+            &mut subscriptions,
+            &mut identity,
+            server,
+        )
+        .await
+        {
             Answer::Reply(Value::Error(said)) => {
                 eprintln!("a recorded command was refused: {said}")
             }

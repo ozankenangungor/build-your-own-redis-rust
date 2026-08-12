@@ -81,8 +81,12 @@ fn keeps_the_password_for_every_client_and_not_the_one_that_set_it() {
     setting.send(&["ACL", "SETUSER", "default", ">mypassword"]);
     setting.expect_reply("+OK\r\n");
 
-    // There is one user, and it is the same user on every connection.
+    // There is one user, and it is the same user on every connection: the new
+    // one is shut out until it gives the password, and then sees the same.
     let mut asking = server.connect();
+
+    asking.send(&["AUTH", "default", "mypassword"]);
+    asking.expect_reply("+OK\r\n");
 
     asking.send(&["ACL", "GETUSER", "default"]);
     asking.expect_reply(&format!(
@@ -104,6 +108,79 @@ fn lets_in_a_client_that_knows_the_password_and_turns_away_one_that_does_not() {
 
     client.send(&["AUTH", "default", "mypassword"]);
     client.expect_reply("+OK\r\n");
+}
+
+#[test]
+fn shuts_out_a_new_connection_and_leaves_the_one_that_set_the_password_in() {
+    let server = Server::start();
+    let mut inside = server.connect();
+
+    inside.send(&["ACL", "SETUSER", "default", ">newpassword"]);
+    inside.expect_reply("+OK\r\n");
+
+    // The connection that set the password was let in before it, and stays in.
+    inside.send(&["ACL", "WHOAMI"]);
+    inside.expect_reply("$7\r\ndefault\r\n");
+
+    // One made afterwards has to ask.
+    let mut outside = server.connect();
+
+    outside.send(&["ACL", "WHOAMI"]);
+    let said = outside.read_line();
+
+    assert!(said.starts_with("-NOAUTH"), "{said:?}");
+}
+
+#[test]
+fn shuts_a_new_connection_out_of_everything_it_might_ask_for() {
+    let server = Server::start();
+    let mut inside = server.connect();
+
+    inside.send(&["ACL", "SETUSER", "default", ">newpassword"]);
+    inside.expect_reply("+OK\r\n");
+
+    let mut outside = server.connect();
+
+    for command in [
+        ["PING"].as_slice(),
+        ["GET", "foo"].as_slice(),
+        ["SET", "foo", "bar"].as_slice(),
+        ["ACL", "GETUSER", "default"].as_slice(),
+        ["SUBSCRIBE", "channel"].as_slice(),
+        ["MULTI"].as_slice(),
+        ["NONSENSE"].as_slice(),
+    ] {
+        outside.send(command);
+        let said = outside.read_line();
+
+        assert!(said.starts_with("-NOAUTH"), "{command:?}: {said:?}");
+    }
+}
+
+#[test]
+fn lets_a_shut_out_connection_say_who_it_is() {
+    let server = Server::start();
+    let mut inside = server.connect();
+
+    inside.send(&["ACL", "SETUSER", "default", ">newpassword"]);
+    inside.expect_reply("+OK\r\n");
+
+    let mut outside = server.connect();
+
+    // A wrong password leaves it outside, and a right one lets it in.
+    outside.send(&["AUTH", "default", "wrongpassword"]);
+    let said = outside.read_line();
+    assert!(said.starts_with("-WRONGPASS"), "{said:?}");
+
+    outside.send(&["ACL", "WHOAMI"]);
+    let said = outside.read_line();
+    assert!(said.starts_with("-NOAUTH"), "{said:?}");
+
+    outside.send(&["AUTH", "default", "newpassword"]);
+    outside.expect_reply("+OK\r\n");
+
+    outside.send(&["ACL", "WHOAMI"]);
+    outside.expect_reply("$7\r\ndefault\r\n");
 }
 
 #[test]

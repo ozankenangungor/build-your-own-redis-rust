@@ -13,9 +13,61 @@ const DEFAULT_USER: &str = "default";
 /// its own to check against.
 const NO_PASSWORD: &[u8] = b"nopass";
 
+/// The commands a client may use before it has been let in.
+///
+/// Only the ones it would need to get in, or to give up trying. Anything else
+/// is work done on the server's behalf, and the server does not yet know who is
+/// asking. As with the commands a listening client may use, the list is Redis's
+/// and names some this server has yet to learn.
+const ALLOWED_WHILE_OUT: &[&str] = &["AUTH", "HELLO", "QUIT", "RESET"];
+
+/// Whether a connection has been let in.
+///
+/// This belongs to the connection: being let in is something a client does, and
+/// it lasts as long as the client does.
+pub struct Identity {
+    authenticated: bool,
+}
+
+impl Identity {
+    /// A connection just made.
+    ///
+    /// It is let in from the start if the user wants no password, which is why
+    /// a server nobody has given a password to serves anyone who calls. A
+    /// password set later shuts the door on connections made after it, and only
+    /// on those: one already inside stays inside.
+    pub fn new(users: &Users) -> Self {
+        Self {
+            authenticated: users.wants_no_password(),
+        }
+    }
+
+    /// A connection that answers to nobody: a command played back out of a
+    /// record, or one a master sent along. There is no client to ask.
+    pub fn trusted() -> Self {
+        Self {
+            authenticated: true,
+        }
+    }
+
+    pub fn is_authenticated(&self) -> bool {
+        self.authenticated
+    }
+}
+
+/// Whether a client that has not been let in may still use this command.
+pub fn allowed_while_out(command: &str) -> bool {
+    ALLOWED_WHILE_OUT.contains(&command)
+}
+
+/// What a client is told when it asks for something before it has been let in.
+pub fn needs_authenticating() -> Value {
+    Value::Error("NOAUTH Authentication required.".into())
+}
+
 /// Handles the commands that ask who a client is and what it may do. `None`
 /// means the command belongs to another module.
-pub fn run(command: &str, args: &[Bytes], users: &Users) -> Option<Value> {
+pub fn run(command: &str, args: &[Bytes], users: &Users, identity: &mut Identity) -> Option<Value> {
     let reply = match command {
         // `ACL` covers several commands in one, told apart by the word after it.
         "ACL" => match args.split_first() {
@@ -34,11 +86,11 @@ pub fn run(command: &str, args: &[Bytes], users: &Users) -> Option<Value> {
             Some((action, _)) => unknown_action(action),
             None => wrong_arity("acl"),
         },
-        // Whether a client knows a password the user may be let in with. The
-        // connection is not yet held to the answer; that comes later.
+        // Whether a client knows a password the user may be let in with, and,
+        // if it does, the connection held to it from then on.
         "AUTH" => match args {
-            [password] => alone(password, users),
-            [user, password] => authenticate(user, password, users),
+            [password] => alone(password, users, identity),
+            [user, password] => authenticate(user, password, users, identity),
             _ => wrong_arity("auth"),
         },
         _ => return None,
@@ -52,10 +104,14 @@ pub fn run(command: &str, args: &[Bytes], users: &Users) -> Option<Value> {
 /// A user this server has never heard of is turned away in the same words as a
 /// password that does not match, so that a client learns nothing from the
 /// asking beyond whether it got in.
-fn authenticate(user: &Bytes, password: &Bytes, users: &Users) -> Value {
+fn authenticate(user: &Bytes, password: &Bytes, users: &Users, identity: &mut Identity) -> Value {
     if user != DEFAULT_USER || !users.accepts(password) {
         return wrong_password();
     }
+
+    // Being let in is the point of asking, so the connection is held to it from
+    // here on and need not ask again.
+    identity.authenticated = true;
 
     Value::SimpleString("OK".into())
 }
@@ -65,7 +121,7 @@ fn authenticate(user: &Bytes, password: &Bytes, users: &Users) -> Value {
 /// Redis takes it for the default user, but only when that user has a password
 /// to check: told a password where none was ever set, it says so rather than
 /// letting the client believe it had done something.
-fn alone(password: &Bytes, users: &Users) -> Value {
+fn alone(password: &Bytes, users: &Users, identity: &mut Identity) -> Value {
     if users.wants_no_password() {
         return Value::Error(
             "ERR Client sent AUTH, but no password is set. Did you mean AUTH <username> <password>?"
@@ -77,6 +133,7 @@ fn alone(password: &Bytes, users: &Users) -> Value {
         &Bytes::from_static(DEFAULT_USER.as_bytes()),
         password,
         users,
+        identity,
     )
 }
 
@@ -181,7 +238,7 @@ mod tests {
             .map(|word| Bytes::copy_from_slice(word.as_bytes()))
             .collect();
 
-        run("ACL", &args, users).expect("acl belongs to this module")
+        run("ACL", &args, users, &mut Identity::trusted()).expect("acl belongs to this module")
     }
 
     #[test]
@@ -315,12 +372,16 @@ mod tests {
     }
 
     fn auth(words: &[&str], users: &Users) -> Value {
+        auth_as(words, users, &mut Identity::new(users))
+    }
+
+    fn auth_as(words: &[&str], users: &Users, identity: &mut Identity) -> Value {
         let args: Vec<Bytes> = words
             .iter()
             .map(|word| Bytes::copy_from_slice(word.as_bytes()))
             .collect();
 
-        run("AUTH", &args, users).expect("auth belongs to this module")
+        run("AUTH", &args, users, identity).expect("auth belongs to this module")
     }
 
     #[test]
@@ -404,6 +465,62 @@ mod tests {
     }
 
     #[test]
+    fn lets_a_new_connection_in_while_the_user_wants_no_password() {
+        let users = Users::default();
+
+        assert!(Identity::new(&users).is_authenticated());
+    }
+
+    #[test]
+    fn shuts_out_a_new_connection_once_the_user_has_a_password() {
+        let users = Users::default();
+        acl_of(&["SETUSER", "default", ">mypassword"], &users);
+
+        assert!(!Identity::new(&users).is_authenticated());
+    }
+
+    #[test]
+    fn leaves_a_connection_already_inside_where_it_is() {
+        let users = Users::default();
+        let inside = Identity::new(&users);
+
+        acl_of(&["SETUSER", "default", ">mypassword"], &users);
+
+        // A password set afterwards is no reason to turn away a client that was
+        // let in before it.
+        assert!(inside.is_authenticated());
+    }
+
+    #[test]
+    fn holds_a_connection_to_the_password_it_gave() {
+        let users = Users::default();
+        acl_of(&["SETUSER", "default", ">mypassword"], &users);
+
+        let mut identity = Identity::new(&users);
+        assert!(!identity.is_authenticated());
+
+        auth_as(&["default", "wrongpassword"], &users, &mut identity);
+        assert!(!identity.is_authenticated());
+
+        auth_as(&["default", "mypassword"], &users, &mut identity);
+        assert!(identity.is_authenticated());
+    }
+
+    #[test]
+    fn leaves_open_the_commands_a_client_needs_to_get_in() {
+        for command in ["AUTH", "HELLO", "QUIT", "RESET"] {
+            assert!(allowed_while_out(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn closes_off_the_commands_that_are_work() {
+        for command in ["GET", "SET", "ACL", "PING", "SUBSCRIBE", "MULTI"] {
+            assert!(!allowed_while_out(command), "{command}");
+        }
+    }
+
+    #[test]
     fn refuses_an_auth_that_says_nothing() {
         let users = Users::default();
 
@@ -439,6 +556,6 @@ mod tests {
 
     #[test]
     fn leaves_alone_the_commands_that_are_not_its_own() {
-        assert!(run("GET", &[], &Users::default()).is_none());
+        assert!(run("GET", &[], &Users::default(), &mut Identity::trusted()).is_none());
     }
 }
