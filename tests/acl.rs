@@ -184,6 +184,56 @@ fn lets_a_shut_out_connection_say_who_it_is() {
 }
 
 #[test]
+fn lets_a_client_in_for_good_once_it_has_given_the_password() {
+    let server = Server::start();
+    let mut inside = server.connect();
+
+    inside.send(&["ACL", "SETUSER", "default", ">newpassword"]);
+    inside.expect_reply("+OK\r\n");
+
+    let mut outside = server.connect();
+
+    outside.send(&["PING"]);
+    let said = outside.read_line();
+    assert!(said.starts_with("-NOAUTH"), "{said:?}");
+
+    outside.send(&["AUTH", "default", "newpassword"]);
+    outside.expect_reply("+OK\r\n");
+
+    // Being let in lasts as long as the connection: everything it could not ask
+    // for before, it may ask for now, and without asking again.
+    outside.send(&["PING"]);
+    outside.expect_reply("+PONG\r\n");
+    outside.send(&["SET", "foo", "bar"]);
+    outside.expect_reply("+OK\r\n");
+    outside.send(&["GET", "foo"]);
+    outside.expect_reply("$3\r\nbar\r\n");
+    outside.send(&["ACL", "WHOAMI"]);
+    outside.expect_reply("$7\r\ndefault\r\n");
+}
+
+#[test]
+fn leaves_the_other_clients_where_they_were_when_one_gets_in() {
+    let server = Server::start();
+    let mut inside = server.connect();
+
+    inside.send(&["ACL", "SETUSER", "default", ">newpassword"]);
+    inside.expect_reply("+OK\r\n");
+
+    let mut letting_itself_in = server.connect();
+    let mut staying_out = server.connect();
+
+    letting_itself_in.send(&["AUTH", "default", "newpassword"]);
+    letting_itself_in.expect_reply("+OK\r\n");
+
+    // One client getting in says nothing about another.
+    staying_out.send(&["PING"]);
+    let said = staying_out.read_line();
+
+    assert!(said.starts_with("-NOAUTH"), "{said:?}");
+}
+
+#[test]
 fn takes_a_password_set_on_another_connection() {
     let server = Server::start();
     let mut setting = server.connect();
