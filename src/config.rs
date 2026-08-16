@@ -103,7 +103,7 @@ impl Config {
                 "appendonly" => config.appendonly = yes_or_no_given(&value)?,
                 "appenddirname" => config.appenddirname = value,
                 "appendfilename" => config.appendfilename = value,
-                "appendfsync" => config.appendfsync = value,
+                "appendfsync" => config.appendfsync = appendfsync_given(value)?,
                 _ => bail!("unknown flag '{flag}'"),
             }
         }
@@ -148,6 +148,30 @@ fn yes_or_no_given(value: &str) -> Result<bool> {
         "no" => Ok(false),
         _ => bail!("expected 'yes' or 'no', found '{value}'"),
     }
+}
+
+/// The answers Redis takes to how often what has been written is pushed through
+/// to the disk: on every write, once a second, or whenever the system sees fit.
+const APPENDFSYNCS: [&str; 3] = ["always", "everysec", "no"];
+
+/// Reads how often to push writes through to the disk, in the words Redis takes
+/// it in. The value is kept as it was given, since it is answered for by
+/// `CONFIG GET` and read back case insensitively.
+///
+/// Anything outside the three is refused, for the reason [`yes_or_no_given`]
+/// refuses a third answer: this setting decides how much work a sudden stop can
+/// cost, and a server that quietly took `--appendfsync alway` for the once a
+/// second it was never asked for would be less safe than whoever started it
+/// believes.
+fn appendfsync_given(value: String) -> Result<String> {
+    if !APPENDFSYNCS
+        .iter()
+        .any(|known| value.eq_ignore_ascii_case(known))
+    {
+        bail!("expected 'always', 'everysec' or 'no', found '{value}'");
+    }
+
+    Ok(value)
 }
 
 impl Master {
@@ -262,6 +286,24 @@ mod tests {
         assert_eq!(config.appenddirname, "aof");
         assert_eq!(config.appendfilename, "writes.aof");
         assert_eq!(config.appendfsync, "always");
+    }
+
+    #[test]
+    fn takes_each_of_the_ways_of_pushing_writes_through_to_the_disk() {
+        for spelling in ["always", "everysec", "no", "ALWAYS", "EverySec"] {
+            let config = parse(&["--appendfsync", spelling]).unwrap();
+
+            assert_eq!(config.appendfsync, spelling, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_way_of_pushing_writes_through_that_it_has_never_heard_of() {
+        // Taken quietly for the default, this would leave the server less safe
+        // than whoever started it asked for.
+        for spelling in ["alway", "always ", "sometimes", "yes", ""] {
+            assert!(parse(&["--appendfsync", spelling]).is_err(), "{spelling:?}");
+        }
     }
 
     #[test]
