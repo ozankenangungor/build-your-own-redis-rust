@@ -323,6 +323,63 @@ fn records_every_kind_of_write_it_knows() {
 }
 
 #[test]
+fn records_a_blpop_as_the_lpop_it_amounted_to() {
+    let data = Data::new();
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    client.send(&["RPUSH", "l", "a", "b"]);
+    client.read_reply();
+    client.send(&["BLPOP", "l", "0"]);
+    client.expect_reply("*2\r\n$1\r\nl\r\n$1\r\na\r\n");
+
+    // Written down word for word it would leave the next run of this server
+    // waiting on the list rather than taking from it.
+    assert_eq!(
+        std::fs::read(data.records("appendonly.aof.1.incr.aof")).unwrap(),
+        b"*4\r\n$5\r\nRPUSH\r\n$1\r\nl\r\n$1\r\na\r\n$1\r\nb\r\n\
+          *2\r\n$4\r\nLPOP\r\n$1\r\nl\r\n"
+    );
+}
+
+#[test]
+fn records_nothing_for_a_blpop_that_waited_and_took_nothing() {
+    let data = Data::new();
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    client.send(&["BLPOP", "l", "0.1"]);
+    client.expect_reply("*-1\r\n");
+
+    assert_eq!(
+        std::fs::read(data.records("appendonly.aof.1.incr.aof")).unwrap(),
+        b""
+    );
+}
+
+#[test]
+fn comes_up_without_what_a_recorded_blpop_took() {
+    let data = Data::new();
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    client.send(&["RPUSH", "l", "a", "b", "c"]);
+    client.read_reply();
+    client.send(&["BLPOP", "l", "0"]);
+    client.read_reply();
+    drop(client);
+    drop(server);
+
+    // The whole way round: an element taken by a `BLPOP` is one the next run of
+    // this server never sees again.
+    let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
+    let mut client = server.connect();
+
+    client.send(&["LRANGE", "l", "0", "-1"]);
+    client.expect_reply("*2\r\n$1\r\nb\r\n$1\r\nc\r\n");
+}
+
+#[test]
 fn records_the_writes_of_one_client_after_those_of_another() {
     let data = Data::new();
     let server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);

@@ -142,18 +142,19 @@ async fn dispatch(
 ) -> Value {
     let reply = run_against(command, store, transaction, subscriptions, identity, server).await;
 
-    // A command that changed nothing is nothing to pass on or write down, and
-    // one that failed changed nothing.
-    if !changes_the_store(&command.uppercased) || matches!(reply, Value::Error(_)) {
+    // A command that failed changed nothing, and one that changed nothing is
+    // nothing to pass on or write down.
+    if matches!(reply, Value::Error(_)) {
         return reply;
     }
-
-    let as_sent = command.as_sent();
+    let Some(written) = written_down(command, &reply) else {
+        return reply;
+    };
 
     // The record of the write is made before its reply goes out, so that a
     // client is never told a write took when nothing knows of it but memory.
     if let Some(aof) = server.aof.get()
-        && let Err(e) = aof.record(&as_sent).await
+        && let Err(e) = aof.record(&written).await
     {
         eprintln!("could not record a command: {e:#}");
         return unrecorded();
@@ -162,7 +163,7 @@ async fn dispatch(
     // Replicas are told what changed only once it has, and only by the server
     // the change was asked of: a replica passes nothing on of its own.
     if server.config.replicaof.is_none() {
-        let passed_on = server.replicas.send(&as_sent);
+        let passed_on = server.replicas.send(&written);
         server.replication.advance(passed_on);
     }
 
@@ -226,17 +227,33 @@ async fn run_against(
     unknown_command(name)
 }
 
-/// Whether a command leaves the store different from how it found it, and so
-/// has to reach the replicas for them to stay a copy of it.
+/// What a command that changed the store leaves for the replicas and the
+/// record: the words that would bring another server to the same state.
 ///
-/// `BLPOP` is missing on purpose: a replica handed one would wait on it, when
-/// what it needs to be told is that an element went. Redis passes on what a
-/// command did rather than the command itself, which is still to come here.
-fn changes_the_store(command: &str) -> bool {
-    matches!(
-        command,
-        "SET" | "INCR" | "RPUSH" | "LPUSH" | "LPOP" | "XADD" | "ZADD" | "ZREM" | "GEOADD"
-    )
+/// Usually the command as it came in. `BLPOP` is the exception, and the reason
+/// this answers with words rather than with yes or no: passed on as it stands it
+/// would leave whoever replayed it waiting on a list, when what happened here
+/// was that an element went. Redis passes on what a command did rather than the
+/// command itself, and what this one did was an `LPOP`.
+///
+/// `None` covers both the commands that change nothing and the `BLPOP` that
+/// waited out its timeout and took nothing with it.
+fn written_down(command: &Command, reply: &Value) -> Option<Value> {
+    match command.uppercased.as_str() {
+        "SET" | "INCR" | "RPUSH" | "LPUSH" | "LPOP" | "XADD" | "ZADD" | "ZREM" | "GEOADD" => {
+            Some(command.as_sent())
+        }
+        // Naming an element is the only sign one went: a timeout answers with
+        // nothing at all.
+        "BLPOP" => match (command.args.first(), reply) {
+            (Some(key), Value::Array(_)) => Some(Value::Array(vec![
+                Value::BulkString(Bytes::from_static(b"LPOP")),
+                Value::BulkString(key.clone()),
+            ])),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 impl Command {
@@ -322,4 +339,95 @@ fn unrecorded() -> Value {
 
 fn wrong_type() -> Value {
     Value::Error("WRONGTYPE Operation against a key holding the wrong kind of value".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command(words: &[&str]) -> Command {
+        let parts = words
+            .iter()
+            .map(|word| Value::BulkString(Bytes::copy_from_slice(word.as_bytes())))
+            .collect();
+
+        Command::parse(Value::Array(parts)).expect("a command of bulk strings")
+    }
+
+    /// What a command is written down as, given what it answered.
+    fn written(words: &[&str], reply: Value) -> Option<Vec<String>> {
+        let Value::Array(parts) = written_down(&command(words), &reply)? else {
+            panic!("a command is written down as an array");
+        };
+
+        Some(
+            parts
+                .iter()
+                .map(|part| match part {
+                    Value::BulkString(word) => String::from_utf8_lossy(word).into_owned(),
+                    _ => panic!("a command is written down in bulk strings"),
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn writes_a_write_down_as_it_came_in() {
+        for words in [
+            vec!["SET", "foo", "bar"],
+            vec!["INCR", "counter"],
+            vec!["RPUSH", "list", "a"],
+            vec!["LPOP", "list"],
+            vec!["ZADD", "racers", "8.0", "Sam"],
+        ] {
+            assert_eq!(
+                written(&words, Value::SimpleString("OK".into())),
+                Some(words.iter().map(|word| (*word).to_string()).collect()),
+                "{words:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn writes_a_write_down_under_the_name_the_client_spelled() {
+        // The words go out as they came in, since a replica reads them the way
+        // any other client would.
+        assert_eq!(
+            written(&["set", "foo", "bar"], Value::SimpleString("OK".into())),
+            Some(vec!["set".into(), "foo".into(), "bar".into()])
+        );
+    }
+
+    #[test]
+    fn writes_nothing_down_for_a_command_that_changes_nothing() {
+        for words in [
+            vec!["GET", "foo"],
+            vec!["PING"],
+            vec!["TYPE", "foo"],
+            vec!["LRANGE", "list", "0", "-1"],
+            vec!["SUBSCRIBE", "channel"],
+        ] {
+            assert_eq!(written(&words, Value::Null), None, "{words:?}");
+        }
+    }
+
+    #[test]
+    fn writes_a_blpop_down_as_the_lpop_it_amounted_to() {
+        // Written down word for word it would leave whoever replayed it waiting
+        // on a list. What it did was take the first element off one.
+        let reply = Value::Array(vec![
+            Value::BulkString(Bytes::from_static(b"list")),
+            Value::BulkString(Bytes::from_static(b"a")),
+        ]);
+
+        assert_eq!(
+            written(&["BLPOP", "list", "0"], reply),
+            Some(vec!["LPOP".into(), "list".into()])
+        );
+    }
+
+    #[test]
+    fn writes_nothing_down_for_a_blpop_that_waited_and_took_nothing() {
+        assert_eq!(written(&["BLPOP", "list", "0.1"], Value::NullArray), None);
+    }
 }

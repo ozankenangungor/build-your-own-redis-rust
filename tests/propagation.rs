@@ -56,6 +56,36 @@ fn passes_on_every_command_that_changes_the_store() {
 }
 
 #[test]
+fn passes_a_blpop_on_as_the_lpop_it_amounted_to() {
+    let server = Server::start();
+    let (mut replica, _) = follow(&server);
+    let mut client = server.connect();
+
+    client.send(&["RPUSH", "list", "a", "b"]);
+    client.expect_reply(":2\r\n");
+    replica.expect_reply("*4\r\n$5\r\nRPUSH\r\n$4\r\nlist\r\n$1\r\na\r\n$1\r\nb\r\n");
+
+    client.send(&["BLPOP", "list", "0"]);
+    client.expect_reply("*2\r\n$4\r\nlist\r\n$1\r\na\r\n");
+
+    // Passed on word for word a replica would wait on it, and never hear that
+    // the element had gone. What it is told is what the command did.
+    replica.expect_reply("*2\r\n$4\r\nLPOP\r\n$4\r\nlist\r\n");
+}
+
+#[test]
+fn keeps_to_itself_a_blpop_that_waited_and_took_nothing() {
+    let server = Server::start();
+    let (mut replica, _) = follow(&server);
+    let mut client = server.connect();
+
+    client.send(&["BLPOP", "empty", "0.1"]);
+    client.expect_reply("*-1\r\n");
+
+    replica.expect_silence();
+}
+
+#[test]
 fn keeps_reads_to_itself() {
     let server = Server::start();
     let (mut replica, _) = follow(&server);
