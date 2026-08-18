@@ -384,6 +384,20 @@ mod tests {
     }
 
     #[test]
+    fn keeps_the_sets_at_two_keys_apart() {
+        let store = Store::default();
+
+        store
+            .zadd(&named("racers"), &[(8.0, named("Sam"))])
+            .unwrap();
+
+        // The same name under another key is a member that key had never held.
+        assert_eq!(store.zadd(&named("riders"), &[(8.0, named("Sam"))]), Ok(1));
+        assert_eq!(store.zcard(&named("racers")), Ok(1));
+        assert_eq!(store.zcard(&named("riders")), Ok(1));
+    }
+
+    #[test]
     fn counts_the_members_added_in_one_go() {
         let store = Store::default();
         let members = [(1.0, named("a")), (2.0, named("b")), (3.0, named("c"))];

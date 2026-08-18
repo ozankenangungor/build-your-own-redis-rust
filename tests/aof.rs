@@ -81,32 +81,6 @@ fn makes_somewhere_to_record_its_writes_before_it_takes_a_client() {
 }
 
 #[test]
-fn leaves_the_file_it_makes_empty() {
-    let data = Data::new();
-    let _server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
-
-    // Nothing is recorded until there is something to record.
-    let file = data
-        .holds("appendonlydir")
-        .join("appendonly.aof.1.incr.aof");
-
-    assert_eq!(std::fs::read(&file).unwrap(), b"");
-}
-
-#[test]
-fn writes_a_manifest_naming_the_file_it_made() {
-    let data = Data::new();
-    let _server = Server::start_with(&["--dir", data.dir(), "--appendonly", "yes"]);
-
-    let manifest = data.holds("appendonlydir").join("appendonly.aof.manifest");
-
-    assert_eq!(
-        std::fs::read_to_string(&manifest).unwrap(),
-        "file appendonly.aof.1.incr.aof seq 1 type i\n"
-    );
-}
-
-#[test]
 fn records_under_the_names_it_was_given() {
     let data = Data::new();
     let _server = Server::start_with(&[

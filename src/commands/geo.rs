@@ -732,6 +732,19 @@ mod tests {
     }
 
     #[test]
+    fn answers_for_a_place_it_does_not_hold_beside_one_it_does() {
+        let store = Store::default();
+        geoadd_to(&["places", "-0.0884948", "51.5006479", "London"], &store);
+
+        // The answers still line up with the asking: a place that is not there
+        // is answered with nothing rather than left out.
+        let answered = geopos(&["places", "London", "nowhere"], &store).encode();
+
+        assert!(answered.starts_with(b"*2\r\n*2\r\n"), "{answered:?}");
+        assert!(answered.ends_with(b"*-1\r\n"), "{answered:?}");
+    }
+
+    #[test]
     fn answers_for_every_place_asked_after_of_a_key_that_is_not_there() {
         let store = Store::default();
 
@@ -1130,6 +1143,7 @@ mod tests {
             ("-180", "-85.05112878"),
             ("180", "85.05112878"),
             ("-180", "85.05112878"),
+            ("180", "-85.05112878"),
             ("0", "0"),
         ] {
             assert!(read(longitude, latitude).is_ok(), "{longitude},{latitude}");
