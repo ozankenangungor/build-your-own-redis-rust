@@ -67,20 +67,17 @@ impl Aof {
             let read = crate::resp::parse(&recorded[at..])
                 .with_context(|| format!("reading {} at byte {at}", self.path.display()))?;
 
-            match read {
-                Some((command, taken)) => {
-                    commands.push(command);
-                    at += taken;
-                }
-                None => {
-                    eprintln!(
-                        "{} ends mid-command, {} bytes in; leaving the rest of it",
-                        self.path.display(),
-                        recorded.len() - at,
-                    );
-                    break;
-                }
-            }
+            let Some((command, taken)) = read else {
+                eprintln!(
+                    "{} ends mid-command, {} bytes in; leaving the rest of it",
+                    self.path.display(),
+                    recorded.len() - at,
+                );
+                break;
+            };
+
+            commands.push(command);
+            at += taken;
         }
 
         Ok(commands)

@@ -51,7 +51,7 @@ async fn replay(recorded: Vec<Value>, store: &Store, server: &Server) -> usize {
         .await
         {
             Answer::Reply(Value::Error(said)) => {
-                eprintln!("a recorded command was refused: {said}")
+                eprintln!("a recorded command was refused: {said}");
             }
             _ => replayed += 1,
         }

@@ -1,7 +1,7 @@
 use crate::resp::Value;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::{Notify, futures::Notified, mpsc};
 
 /// The replicas following this master, and the way to reach them.
@@ -110,7 +110,7 @@ impl Replicas {
             .0
             .following
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
 
         following.retain(|replica| !replica.changes.is_closed());
 

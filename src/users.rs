@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// The passwords the one user of this server may be let in with, shared by
 /// every connection.
@@ -53,18 +53,13 @@ impl Users {
     fn passwords(&self) -> MutexGuard<'_, Vec<String>> {
         // A panic elsewhere poisons the lock but leaves the passwords intact,
         // so recover rather than shutting everybody out.
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 /// A password as it is kept: its SHA-256 hash, written in lower-case hex.
 fn hashed(password: &[u8]) -> String {
-    Sha256::digest(password)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    format!("{:x}", Sha256::digest(password))
 }
 
 #[cfg(test)]

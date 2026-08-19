@@ -9,7 +9,7 @@ pub use strings::IncrementError;
 
 use bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 use tokio::sync::{Notify, oneshot};
 
@@ -138,9 +138,7 @@ impl Store {
     fn state(&self) -> MutexGuard<'_, State> {
         // A panic elsewhere poisons the lock but leaves the state intact, so
         // recover rather than taking down every other connection with it.
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

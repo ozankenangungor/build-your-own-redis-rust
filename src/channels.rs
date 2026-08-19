@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::mpsc;
 
 /// One client's end of the channels it listens on: what to hand a message to
@@ -68,9 +68,7 @@ impl Channels {
     fn listeners(&self) -> MutexGuard<'_, HashMap<Bytes, Vec<Listener>>> {
         // A panic elsewhere poisons the lock but leaves the tally intact, so
         // recover rather than taking down every other connection with it.
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

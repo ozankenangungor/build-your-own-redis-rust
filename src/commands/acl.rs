@@ -154,9 +154,10 @@ fn user_named(user: &Bytes, users: &Users) -> Value {
     // A user with no password of its own is flagged as wanting none, which is
     // what makes a client believed without being asked. Give it one and the
     // flag goes: there is now something to check against.
-    let flags = match users.wants_no_password() {
-        true => vec![Value::BulkString(Bytes::from_static(NO_PASSWORD))],
-        false => Vec::new(),
+    let flags = if users.wants_no_password() {
+        vec![Value::BulkString(Bytes::from_static(NO_PASSWORD))]
+    } else {
+        Vec::new()
     };
 
     // The passwords go back hashed, as they are kept, so that a client asking

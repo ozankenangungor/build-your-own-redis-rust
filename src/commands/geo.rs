@@ -251,7 +251,7 @@ fn middle_of(square: u32, range: &std::ops::RangeInclusive<f64>) -> f64 {
     let low = range.start() + span * (f64::from(square) / squares);
     let high = range.start() + span * (f64::from(square + 1) / squares);
 
-    (low + high) / 2.0
+    f64::midpoint(low, high)
 }
 
 /// Gathers up every other bit of a number, closing the gaps that [`spread`]
